@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>営業管理ダッシュボード</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', sans-serif;
+      background: #f1f5f9; color: #1e293b; min-height: 100vh;
+    }
+    .app { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+    /* Header */
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+    .header h1 { font-size: 24px; font-weight: 700; }
+    .month-nav { display: flex; align-items: center; gap: 8px; }
+    .month-nav button {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 6px;
+      padding: 6px 12px; cursor: pointer; font-size: 14px; color: #1e293b;
+      transition: all 0.15s;
+    }
+    .month-nav button:hover { background: #f8fafc; border-color: #cbd5e1; }
+    .month-nav .month-label { font-size: 18px; font-weight: 600; min-width: 120px; text-align: center; }
+    .btn-today { background: #3b82f6 !important; color: #fff !important; border-color: #3b82f6 !important; font-size: 12px !important; }
+    .btn-today:hover { background: #2563eb !important; }
+
+    /* KPI */
+    .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .kpi-card {
+      background: #fff; border-radius: 12px; padding: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .kpi-card .kpi-label { font-size: 12px; color: #64748b; font-weight: 500; margin-bottom: 4px; }
+    .kpi-card .kpi-value { font-size: 28px; font-weight: 700; }
+    .kpi-card .kpi-sub { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+    .kpi-green .kpi-value { color: #10b981; }
+    .kpi-red .kpi-value { color: #ef4444; }
+    .kpi-blue .kpi-value { color: #3b82f6; }
+    .kpi-amber .kpi-value { color: #f59e0b; }
+
+    /* Tabs */
+    .tab-nav { display: flex; border-bottom: 2px solid #e2e8f0; margin-bottom: 20px; gap: 0; overflow-x: auto; }
+    .tab-btn {
+      padding: 10px 20px; cursor: pointer; border: none; background: none;
+      font-size: 14px; font-weight: 500; color: #64748b; border-bottom: 2px solid transparent;
+      margin-bottom: -2px; white-space: nowrap; transition: all 0.15s;
+    }
+    .tab-btn:hover { color: #1e293b; }
+    .tab-btn.active { color: #3b82f6; border-bottom-color: #3b82f6; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* Panel Header */
+    .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
+    .panel-header h2 { font-size: 18px; font-weight: 600; }
+
+    /* Buttons */
+    .btn {
+      padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+      font-size: 14px; font-weight: 500; transition: all 0.15s;
+    }
+    .btn-primary { background: #3b82f6; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-secondary { background: #f1f5f9; color: #1e293b; border: 1px solid #e2e8f0; }
+    .btn-secondary:hover { background: #e2e8f0; }
+    .btn-danger { background: #fee2e2; color: #ef4444; }
+    .btn-danger:hover { background: #fecaca; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    table { width: 100%; border-collapse: collapse; }
+    th { background: #f8fafc; padding: 12px 16px; text-align: left; font-size: 12px; font-weight: 600; color: #64748b; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
+    td { padding: 12px 16px; border-bottom: 1px solid #f1f5f9; font-size: 14px; white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f8fafc; }
+
+    /* Badges */
+    .badge {
+      display: inline-block; padding: 2px 10px; border-radius: 20px;
+      font-size: 12px; font-weight: 600;
+    }
+    .badge-closed { background: #d1fae5; color: #059669; }
+    .badge-lost { background: #fee2e2; color: #dc2626; }
+    .badge-considering { background: #fef3c7; color: #d97706; }
+    .badge-followup { background: #dbeafe; color: #2563eb; }
+
+    /* Modal */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      z-index: 1000; justify-content: center; align-items: flex-start; padding: 40px 16px;
+      overflow-y: auto;
+    }
+    .modal-overlay.show { display: flex; }
+    .modal {
+      background: #fff; border-radius: 16px; width: 100%; max-width: 500px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.2); animation: modalIn 0.2s ease;
+    }
+    @keyframes modalIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+    .modal-head { display: flex; justify-content: space-between; align-items: center; padding: 20px 24px; border-bottom: 1px solid #e2e8f0; }
+    .modal-head h3 { font-size: 18px; font-weight: 600; }
+    .modal-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #94a3b8; line-height: 1; }
+    .modal-close:hover { color: #1e293b; }
+    .modal-body { padding: 24px; }
+
+    /* Forms */
+    .form-group { margin-bottom: 16px; }
+    .form-group label { display: block; font-size: 13px; font-weight: 600; color: #475569; margin-bottom: 6px; }
+    .form-group input[type="text"], .form-group input[type="date"],
+    .form-group select, .form-group textarea {
+      width: 100%; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px;
+      font-size: 14px; color: #1e293b; background: #fff; transition: border-color 0.15s;
+    }
+    .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+      outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+    }
+    .form-check { display: flex; align-items: center; gap: 8px; }
+    .form-check input[type="checkbox"] { width: 16px; height: 16px; accent-color: #3b82f6; }
+    .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 24px; }
+
+    /* Settings */
+    .settings-section { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .settings-section h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+    .add-row { display: flex; gap: 8px; margin-bottom: 16px; }
+    .add-row input { flex: 1; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px; }
+    .closer-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #f1f5f9; }
+    .closer-item:last-child { border-bottom: none; }
+
+    /* Loss analysis */
+    .analysis-card { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .analysis-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+    .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+    .bar-label { width: 140px; font-size: 13px; font-weight: 500; text-align: right; flex-shrink: 0; }
+    .bar-bg { flex: 1; height: 24px; background: #f1f5f9; border-radius: 4px; overflow: hidden; }
+    .bar-fill { height: 100%; background: #3b82f6; border-radius: 4px; transition: width 0.4s ease; min-width: 2px; }
+    .bar-fill.red { background: #ef4444; }
+    .bar-value { width: 90px; font-size: 13px; color: #64748b; flex-shrink: 0; }
+    .insight-box { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 16px; border-radius: 0 8px 8px 0; margin-bottom: 12px; }
+    .insight-box p { font-size: 14px; color: #1e293b; line-height: 1.6; margin-bottom: 4px; }
+    .insight-box p:last-child { margin-bottom: 0; }
+    .recommendation-box { background: #f0fdf4; border-left: 4px solid #10b981; padding: 16px; border-radius: 0 8px 8px 0; }
+    .recommendation-box p { font-size: 14px; color: #1e293b; line-height: 1.6; margin-bottom: 4px; }
+    .recommendation-box p:last-child { margin-bottom: 0; }
+
+    /* Empty state */
+    .empty-state { text-align: center; padding: 48px 24px; color: #94a3b8; }
+    .empty-state .empty-icon { font-size: 48px; margin-bottom: 12px; }
+    .empty-state p { font-size: 14px; }
+
+    /* Export area */
+    .export-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .header { flex-direction: column; align-items: flex-start; }
+      .kpi-row { grid-template-columns: repeat(2, 1fr); }
+      .panel-header { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <h1>営業管理ダッシュボード</h1>
+      <div class="month-nav">
+        <button onclick="changeMonth(-1)">◀</button>
+        <span class="month-label" id="monthLabel"></span>
+        <button onclick="changeMonth(1)">▶</button>
+        <button class="btn-today" onclick="goToCurrentMonth()">今月</button>
+      </div>
+    </header>
+
+    <div class="kpi-row" id="kpiRow"></div>
+
+    <div class="tab-nav">
+      <button class="tab-btn active" data-tab="deals" onclick="switchTab('deals')">商談一覧</button>
+      <button class="tab-btn" data-tab="closers" onclick="switchTab('closers')">クローザー分析</button>
+      <button class="tab-btn" data-tab="loss" onclick="switchTab('loss')">失注理由分析</button>
+      <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">設定</button>
+    </div>
+
+    <div id="tab-deals" class="tab-panel active"></div>
+    <div id="tab-closers" class="tab-panel"></div>
+    <div id="tab-loss" class="tab-panel"></div>
+    <div id="tab-settings" class="tab-panel"></div>
+  </div>
+
+  <div class="modal-overlay" id="dealModal">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="modalTitle">商談追加</h3>
+        <button class="modal-close" onclick="hideModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="dealForm" onsubmit="saveDeal(event)">
+          <div class="form-group">
+            <label>日付</label>
+            <input type="date" name="date" id="fDate" required>
+          </div>
+          <div class="form-group">
+            <label>商談相手の名前</label>
+            <input type="text" name="clientName" id="fClientName" required placeholder="例: 山田太郎">
+          </div>
+          <div class="form-group">
+            <label>担当クローザー</label>
+            <select name="closer" id="fCloser" required>
+              <option value="">選択してください</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>商材単価</label>
+            <select name="productPrice" id="fPrice" required>
+              <option value="200000">20万円</option>
+              <option value="250000">25万円</option>
+              <option value="300000">30万円</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>成約状況</label>
+            <select name="status" id="fStatus" required onchange="onStatusChange()">
+              <option value="considering">検討</option>
+              <option value="closed">成約</option>
+              <option value="lost">失注</option>
+            </select>
+          </div>
+          <div class="form-group" id="lossReasonGroup" style="display:none">
+            <label>失注理由</label>
+            <select name="lossReason" id="fLossReason" onchange="onLossReasonChange()">
+              <option value="予算不足">予算不足</option>
+              <option value="タイミングが合わない">タイミングが合わない</option>
+              <option value="他社に決定">他社に決定</option>
+              <option value="ニーズ不一致">ニーズ不一致</option>
+              <option value="決裁者不在">決裁者不在</option>
+              <option value="連絡不通">連絡不通</option>
+              <option value="その他">その他</option>
+            </select>
+          </div>
+          <div class="form-group" id="customReasonGroup" style="display:none">
+            <label>その他の理由</label>
+            <input type="text" name="customReason" id="fCustomReason" placeholder="理由を入力">
+          </div>
+          <div class="form-group">
+            <div class="form-check">
+              <input type="checkbox" name="hasFollowUp" id="fFollowUp">
+              <label for="fFollowUp" style="margin:0;font-weight:400;font-size:14px;">再面談あり</label>
+            </div>
+          </div>
+          <input type="hidden" name="editId" id="fEditId" value="">
+          <div class="form-actions">
+            <button type="button" class="btn btn-secondary" onclick="hideModal()">キャンセル</button>
+            <button type="submit" class="btn btn-primary">保存</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ===== Constants =====
+    const STORAGE_KEY = 'sales_dashboard_data';
+    const COMMISSION_RATE = 0.175;
+    const CLOSER_RATE = 0.30;
+    const LOSS_REASONS = ['予算不足','タイミングが合わない','他社に決定','ニーズ不一致','決裁者不在','連絡不通','その他'];
+    const RECOMMENDATIONS = {
+      '予算不足': '価格交渉や分割払いの提案を検討してください。',
+      'タイミングが合わない': '適切なフォローアップ時期の設定と長期的な関係構築を意識してください。',
+      '他社に決定': '競合分析を強化し、自社の差別化ポイントを明確に伝えましょう。',
+      'ニーズ不一致': '事前ヒアリングの精度を上げ、ニーズの把握を徹底してください。',
+      '決裁者不在': '初回面談から決裁者の同席を促す運用に変更してください。',
+      '連絡不通': 'フォローアップの頻度・手段を見直し、早期にアプローチしてください。'
+    };
+
+    // ===== State =====
+    let state = {
+      currentMonth: getCurrentMonthKey(),
+      activeTab: 'deals',
+      editingId: null
+    };
+
+    // ===== Data Layer =====
+    function loadData() {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return JSON.parse(raw);
+      return { closers: [], deals: [] };
+    }
+    function saveData(data) { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+
+    function getCurrentMonthKey() {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    }
+    function formatMonth(key) {
+      const [y, m] = key.split('-');
+      return `${y}年${parseInt(m)}月`;
+    }
+    function getPrevMonthKey(key) {
+      const [y, m] = key.split('-').map(Number);
+      const d = new Date(y, m - 2, 1);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    }
+    function getDealsForMonth(data, month) {
+      return data.deals.filter(d => d.month === month);
+    }
+    function generateId() { return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
+    function formatCurrency(n) { return '¥' + n.toLocaleString(); }
+
+    // ===== Calculations =====
+    function calcKPIs(deals) {
+      const closed = deals.filter(d => d.status === 'closed');
+      const lost = deals.filter(d => d.status === 'lost');
+      const considering = deals.filter(d => d.status === 'considering');
+      const followUps = deals.filter(d => d.hasFollowUp);
+      const totalSales = closed.reduce((s, d) => s + d.productPrice * COMMISSION_RATE, 0);
+      const decided = closed.length + lost.length;
+      const closingRate = decided > 0 ? (closed.length / decided * 100) : 0;
+      return {
+        totalSales, closedCount: closed.length, lostCount: lost.length,
+        consideringCount: considering.length, closingRate,
+        totalDeals: deals.length, followUpCount: followUps.length
+      };
+    }
+
+    function calcCloserStats(deals, allClosers) {
+      const map = {};
+      allClosers.forEach(name => {
+        map[name] = { name, total: 0, closed: 0, lost: 0, considering: 0, sales: 0, compensation: 0 };
+      });
+      deals.forEach(d => {
+        if (!map[d.closer]) {
+          map[d.closer] = { name: d.closer, total: 0, closed: 0, lost: 0, considering: 0, sales: 0, compensation: 0 };
+        }
+        const c = map[d.closer];
+        c.total++;
+        if (d.status === 'closed') {
+          c.closed++;
+          c.sales += d.productPrice * COMMISSION_RATE;
+          c.compensation += d.productPrice * COMMISSION_RATE * CLOSER_RATE;
+        } else if (d.status === 'lost') { c.lost++; }
+        else { c.considering++; }
+      });
+      return Object.values(map).map(c => ({
+        ...c, closingRate: (c.closed + c.lost) > 0 ? (c.closed / (c.closed + c.lost) * 100) : 0
+      })).sort((a, b) => b.sales - a.sales);
+    }
+
+    function calcLossAnalysis(deals, prevDeals) {
+      const lost = deals.filter(d => d.status === 'lost');
+      const prevLost = prevDeals.filter(d => d.status === 'lost');
+      const reasonMap = {};
+      lost.forEach(d => { const r = d.lossReason || '不明'; reasonMap[r] = (reasonMap[r] || 0) + 1; });
+      const reasons = Object.entries(reasonMap)
+        .map(([reason, count]) => ({ reason, count, pct: lost.length > 0 ? count / lost.length * 100 : 0 }))
+        .sort((a, b) => b.count - a.count);
+
+      const prevReasonMap = {};
+      prevLost.forEach(d => { const r = d.lossReason || '不明'; prevReasonMap[r] = (prevReasonMap[r] || 0) + 1; });
+
+      const insights = [];
+      if (reasons.length > 0) {
+        insights.push(`今月最も多い失注理由は「${reasons[0].reason}」で、全失注の${reasons[0].pct.toFixed(0)}%を占めています。`);
+      }
+      reasons.forEach(r => {
+        const prev = prevReasonMap[r.reason] || 0;
+        if (prev > 0 && r.count > prev) {
+          insights.push(`「${r.reason}」が先月の${prev}件から${r.count}件に増加しています。`);
+        } else if (prev > 0 && r.count < prev) {
+          insights.push(`「${r.reason}」が先月の${prev}件から${r.count}件に減少しています。`);
+        }
+      });
+      if (lost.length === 0) insights.push('今月の失注はありません。');
+
+      const recs = [];
+      reasons.slice(0, 3).forEach(r => {
+        if (RECOMMENDATIONS[r.reason]) recs.push(RECOMMENDATIONS[r.reason]);
+      });
+
+      return { reasons, insights, recs, totalLost: lost.length, prevTotalLost: prevLost.length };
+    }
+
+    // ===== Rendering =====
+    function render() {
+      const data = loadData();
+      const deals = getDealsForMonth(data, state.currentMonth);
+      const prevDeals = getDealsForMonth(data, getPrevMonthKey(state.currentMonth));
+      document.getElementById('monthLabel').textContent = formatMonth(state.currentMonth);
+      renderKPIs(deals);
+      renderDeals(deals, data.closers);
+      renderClosers(deals, data.closers);
+      renderLoss(deals, prevDeals);
+      renderSettings(data.closers);
+    }
+
+    function renderKPIs(deals) {
+      const k = calcKPIs(deals);
+      document.getElementById('kpiRow').innerHTML = `
+        <div class="kpi-card"><div class="kpi-label">会社売上</div><div class="kpi-value">${formatCurrency(k.totalSales)}</div><div class="kpi-sub">成約単価合計（商材×17.5%）</div></div>
+        <div class="kpi-card kpi-green"><div class="kpi-label">成約</div><div class="kpi-value">${k.closedCount}件</div></div>
+        <div class="kpi-card kpi-red"><div class="kpi-label">失注</div><div class="kpi-value">${k.lostCount}件</div></div>
+        <div class="kpi-card kpi-blue"><div class="kpi-label">成約率</div><div class="kpi-value">${k.closingRate.toFixed(1)}%</div><div class="kpi-sub">成約÷（成約+失注）</div></div>
+        <div class="kpi-card"><div class="kpi-label">商談数</div><div class="kpi-value">${k.totalDeals}件</div><div class="kpi-sub">検討中 ${k.consideringCount} / 再面談 ${k.followUpCount}</div></div>
+      `;
+    }
+
+    function renderDeals(deals, closers) {
+      const panel = document.getElementById('tab-deals');
+      if (deals.length === 0 && closers.length === 0) {
+        panel.innerHTML = `<div class="panel-header"><h2>商談一覧</h2></div><div class="empty-state"><div class="empty-icon">📋</div><p>クローザーを登録してから商談を追加してください。<br>「設定」タブからクローザーを追加できます。</p></div>`;
+        return;
+      }
+      const sorted = [...deals].sort((a, b) => b.date.localeCompare(a.date));
+      let rows = sorted.map(d => {
+        const statusLabel = d.status === 'closed' ? '成約' : d.status === 'lost' ? '失注' : '検討';
+        const statusClass = d.status === 'closed' ? 'badge-closed' : d.status === 'lost' ? 'badge-lost' : 'badge-considering';
+        const commission = d.status === 'closed' ? formatCurrency(d.productPrice * COMMISSION_RATE) : '-';
+        return `<tr>
+          <td>${d.date}</td>
+          <td>${esc(d.clientName)}</td>
+          <td>${esc(d.closer)}</td>
+          <td>${(d.productPrice/10000).toFixed(0)}万円</td>
+          <td><span class="badge ${statusClass}">${statusLabel}</span></td>
+          <td>${d.status === 'lost' ? esc(d.lossReason) : '-'}</td>
+          <td>${d.hasFollowUp ? '<span class="badge badge-followup">再面談</span>' : '-'}</td>
+          <td>${commission}</td>
+          <td>
+            <button class="btn btn-secondary btn-sm" onclick="editDeal('${d.id}')">編集</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteDeal('${d.id}')">削除</button>
+          </td>
+        </tr>`;
+      }).join('');
+
+      panel.innerHTML = `
+        <div class="panel-header"><h2>商談一覧</h2><button class="btn btn-primary" onclick="showAddModal()">+ 商談追加</button></div>
+        ${deals.length === 0 ? '<div class="empty-state"><div class="empty-icon">📋</div><p>商談データがありません。「+ 商談追加」から追加してください。</p></div>' :
+        `<div class="table-wrap"><table>
+          <thead><tr><th>日付</th><th>商談相手</th><th>クローザー</th><th>商材単価</th><th>状況</th><th>失注理由</th><th>再面談</th><th>成約単価</th><th>操作</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>`}
+      `;
+    }
+
+    function renderClosers(deals, closers) {
+      const panel = document.getElementById('tab-closers');
+      const stats = calcCloserStats(deals, closers);
+      if (stats.length === 0) {
+        panel.innerHTML = `<h2 style="margin-bottom:16px">クローザー分析</h2><div class="empty-state"><div class="empty-icon">👤</div><p>クローザーが登録されていません。</p></div>`;
+        return;
+      }
+      const rows = stats.map(c => `<tr>
+        <td style="font-weight:600">${esc(c.name)}</td>
+        <td>${c.total}件</td>
+        <td>${c.closed}件</td>
+        <td>${c.lost}件</td>
+        <td>${c.considering}件</td>
+        <td style="font-weight:600">${c.closingRate.toFixed(1)}%</td>
+        <td>${formatCurrency(c.sales)}</td>
+        <td style="font-weight:600;color:#3b82f6">${formatCurrency(c.compensation)}</td>
+      </tr>`).join('');
+
+      panel.innerHTML = `
+        <h2 style="margin-bottom:16px">クローザー分析</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>クローザー</th><th>商談数</th><th>成約</th><th>失注</th><th>検討</th><th>成約率</th><th>売上貢献</th><th>報酬（30%）</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      `;
+    }
+
+    function renderLoss(deals, prevDeals) {
+      const panel = document.getElementById('tab-loss');
+      const analysis = calcLossAnalysis(deals, prevDeals);
+
+      let barChart = '';
+      if (analysis.reasons.length > 0) {
+        const maxCount = analysis.reasons[0].count;
+        barChart = `<div class="analysis-card"><h3>失注理由の内訳</h3>` +
+          analysis.reasons.map(r => `<div class="bar-row">
+            <span class="bar-label">${esc(r.reason)}</span>
+            <div class="bar-bg"><div class="bar-fill red" style="width:${r.count/maxCount*100}%"></div></div>
+            <span class="bar-value">${r.count}件（${r.pct.toFixed(0)}%）</span>
+          </div>`).join('') + `</div>`;
+      }
+
+      let insightHtml = '';
+      if (analysis.insights.length > 0) {
+        insightHtml = `<div class="analysis-card"><h3>自動分析レポート</h3><div class="insight-box">${analysis.insights.map(i => `<p>${esc(i)}</p>`).join('')}</div>
+        ${analysis.recs.length > 0 ? `<h4 style="margin:16px 0 8px;font-size:14px;font-weight:600;">改善提案</h4><div class="recommendation-box">${analysis.recs.map(r => `<p>・${esc(r)}</p>`).join('')}</div>` : ''}
+        </div>`;
+      }
+
+      const summaryHtml = `<div class="analysis-card"><h3>サマリー</h3>
+        <p style="font-size:14px;color:#475569;">今月の失注: <strong>${analysis.totalLost}件</strong>　／　先月の失注: <strong>${analysis.prevTotalLost}件</strong>
+        ${analysis.totalLost > analysis.prevTotalLost ? ' <span style="color:#ef4444">↑増加</span>' : analysis.totalLost < analysis.prevTotalLost ? ' <span style="color:#10b981">↓減少</span>' : ''}</p></div>`;
+
+      panel.innerHTML = `<h2 style="margin-bottom:16px">失注理由分析</h2>
+        ${analysis.totalLost === 0 ? '<div class="empty-state"><div class="empty-icon">📊</div><p>今月の失注データはありません。</p></div>' : summaryHtml + barChart + insightHtml}`;
+    }
+
+    function renderSettings(closers) {
+      const panel = document.getElementById('tab-settings');
+      const closerList = closers.map(name => `<div class="closer-item"><span>${esc(name)}</span><button class="btn btn-danger btn-sm" onclick="removeCloser('${esc(name)}')">削除</button></div>`).join('');
+
+      panel.innerHTML = `
+        <div class="settings-section">
+          <h3>クローザー管理</h3>
+          <div class="add-row">
+            <input type="text" id="newCloserInput" placeholder="クローザー名を入力" onkeydown="if(event.key==='Enter'){addCloser();}">
+            <button class="btn btn-primary" onclick="addCloser()">追加</button>
+          </div>
+          ${closers.length === 0 ? '<p style="color:#94a3b8;font-size:14px;">クローザーが登録されていません。</p>' : closerList}
+        </div>
+        <div class="settings-section">
+          <h3>データ管理</h3>
+          <div class="export-row">
+            <button class="btn btn-secondary" onclick="exportCSV()">CSV出力（今月）</button>
+            <button class="btn btn-secondary" onclick="exportJSON()">全データバックアップ</button>
+            <button class="btn btn-secondary" onclick="document.getElementById('importFile').click()">データ復元</button>
+            <input type="file" id="importFile" accept=".json" style="display:none" onchange="importJSON(event)">
+          </div>
+        </div>
+        <div class="settings-section">
+          <h3>報酬設定（参考）</h3>
+          <table style="width:auto;">
+            <thead><tr><th>商材単価</th><th>成約単価(17.5%)</th><th>クローザー報酬(30%)</th></tr></thead>
+            <tbody>
+              <tr><td>20万円</td><td>${formatCurrency(200000*0.175)}</td><td>${formatCurrency(200000*0.175*0.30)}</td></tr>
+              <tr><td>25万円</td><td>${formatCurrency(250000*0.175)}</td><td>${formatCurrency(250000*0.175*0.30)}</td></tr>
+              <tr><td>30万円</td><td>${formatCurrency(300000*0.175)}</td><td>${formatCurrency(300000*0.175*0.30)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    // ===== Event Handlers =====
+    function switchTab(tab) {
+      state.activeTab = tab;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab));
+    }
+
+    function changeMonth(delta) {
+      const [y, m] = state.currentMonth.split('-').map(Number);
+      const d = new Date(y, m - 1 + delta, 1);
+      state.currentMonth = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+      render();
+    }
+
+    function goToCurrentMonth() {
+      state.currentMonth = getCurrentMonthKey();
+      render();
+    }
+
+    function showAddModal() {
+      state.editingId = null;
+      document.getElementById('modalTitle').textContent = '商談追加';
+      const form = document.getElementById('dealForm');
+      form.reset();
+      document.getElementById('fDate').value = new Date().toISOString().slice(0, 10);
+      document.getElementById('fStatus').value = 'considering';
+      document.getElementById('fEditId').value = '';
+      onStatusChange();
+      populateCloserSelect();
+      document.getElementById('dealModal').classList.add('show');
+    }
+
+    function editDeal(id) {
+      const data = loadData();
+      const deal = data.deals.find(d => d.id === id);
+      if (!deal) return;
+      state.editingId = id;
+      document.getElementById('modalTitle').textContent = '商談編集';
+      populateCloserSelect();
+      document.getElementById('fDate').value = deal.date;
+      document.getElementById('fClientName').value = deal.clientName;
+      document.getElementById('fCloser').value = deal.closer;
+      document.getElementById('fPrice').value = deal.productPrice;
+      document.getElementById('fStatus').value = deal.status;
+      document.getElementById('fFollowUp').checked = deal.hasFollowUp;
+      document.getElementById('fEditId').value = deal.id;
+      onStatusChange();
+      if (deal.status === 'lost') {
+        if (LOSS_REASONS.includes(deal.lossReason)) {
+          document.getElementById('fLossReason').value = deal.lossReason;
+        } else {
+          document.getElementById('fLossReason').value = 'その他';
+          document.getElementById('fCustomReason').value = deal.lossReason;
+          onLossReasonChange();
+        }
+      }
+      document.getElementById('dealModal').classList.add('show');
+    }
+
+    function hideModal() {
+      document.getElementById('dealModal').classList.remove('show');
+      state.editingId = null;
+    }
+
+    function populateCloserSelect() {
+      const data = loadData();
+      const sel = document.getElementById('fCloser');
+      sel.innerHTML = '<option value="">選択してください</option>' +
+        data.closers.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    }
+
+    function onStatusChange() {
+      const status = document.getElementById('fStatus').value;
+      document.getElementById('lossReasonGroup').style.display = status === 'lost' ? 'block' : 'none';
+      if (status !== 'lost') {
+        document.getElementById('customReasonGroup').style.display = 'none';
+      } else {
+        onLossReasonChange();
+      }
+    }
+
+    function onLossReasonChange() {
+      const reason = document.getElementById('fLossReason').value;
+      document.getElementById('customReasonGroup').style.display = reason === 'その他' ? 'block' : 'none';
+    }
+
+    function saveDeal(e) {
+      e.preventDefault();
+      const data = loadData();
+      const date = document.getElementById('fDate').value;
+      const month = date.slice(0, 7);
+      const status = document.getElementById('fStatus').value;
+      let lossReason = '';
+      if (status === 'lost') {
+        lossReason = document.getElementById('fLossReason').value;
+        if (lossReason === 'その他') {
+          lossReason = document.getElementById('fCustomReason').value || 'その他';
+        }
+      }
+      const dealData = {
+        id: state.editingId || generateId(),
+        date,
+        month,
+        clientName: document.getElementById('fClientName').value.trim(),
+        closer: document.getElementById('fCloser').value,
+        productPrice: parseInt(document.getElementById('fPrice').value),
+        status,
+        lossReason,
+        hasFollowUp: document.getElementById('fFollowUp').checked
+      };
+      if (state.editingId) {
+        const idx = data.deals.findIndex(d => d.id === state.editingId);
+        if (idx !== -1) data.deals[idx] = dealData;
+      } else {
+        data.deals.push(dealData);
+      }
+      saveData(data);
+      hideModal();
+      state.currentMonth = month;
+      render();
+    }
+
+    function deleteDeal(id) {
+      if (!confirm('この商談を削除しますか？')) return;
+      const data = loadData();
+      data.deals = data.deals.filter(d => d.id !== id);
+      saveData(data);
+      render();
+    }
+
+    function addCloser() {
+      const input = document.getElementById('newCloserInput');
+      const name = input.value.trim();
+      if (!name) return;
+      const data = loadData();
+      if (data.closers.includes(name)) { alert('同名のクローザーが既に存在します。'); return; }
+      data.closers.push(name);
+      saveData(data);
+      input.value = '';
+      render();
+    }
+
+    function removeCloser(name) {
+      if (!confirm(`「${name}」を削除しますか？\n※過去の商談データは残ります。`)) return;
+      const data = loadData();
+      data.closers = data.closers.filter(c => c !== name);
+      saveData(data);
+      render();
+    }
+
+    // ===== Export / Import =====
+    function exportCSV() {
+      const data = loadData();
+      const deals = getDealsForMonth(data, state.currentMonth);
+      if (deals.length === 0) { alert('今月のデータがありません。'); return; }
+      const headers = ['日付','商談相手','クローザー','商材単価','状況','失注理由','再面談','成約単価','クローザー報酬'];
+      const rows = deals.map(d => {
+        const statusLabel = d.status === 'closed' ? '成約' : d.status === 'lost' ? '失注' : '検討';
+        const commission = d.status === 'closed' ? d.productPrice * COMMISSION_RATE : 0;
+        const closerComp = d.status === 'closed' ? commission * CLOSER_RATE : 0;
+        return [d.date, d.clientName, d.closer, d.productPrice, statusLabel, d.lossReason || '', d.hasFollowUp ? 'あり' : 'なし', commission, closerComp];
+      });
+      const csv = '\uFEFF' + [headers, ...rows].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
+      downloadFile(csv, `営業データ_${state.currentMonth}.csv`, 'text/csv');
+    }
+
+    function exportJSON() {
+      const data = loadData();
+      const json = JSON.stringify(data, null, 2);
+      downloadFile(json, `営業データバックアップ_${new Date().toISOString().slice(0,10)}.json`, 'application/json');
+    }
+
+    function importJSON(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(ev) {
+        try {
+          const imported = JSON.parse(ev.target.result);
+          if (!imported.closers || !imported.deals) throw new Error('不正なデータ形式');
+          if (!confirm(`データを復元しますか？\nクローザー: ${imported.closers.length}名\n商談: ${imported.deals.length}件\n\n※現在のデータは上書きされます。`)) return;
+          saveData(imported);
+          render();
+          alert('データを復元しました。');
+        } catch (err) {
+          alert('データの読み込みに失敗しました。\n' + err.message);
+        }
+      };
+      reader.readAsText(file);
+      e.target.value = '';
+    }
+
+    function downloadFile(content, filename, type) {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+    }
+
+    // ===== Utilities =====
+    function esc(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    // Close modal on overlay click
+    document.getElementById('dealModal').addEventListener('click', function(e) {
+      if (e.target === this) hideModal();
+    });
+
+    // ===== Init =====
+    render();
+  </script>
+</body>
+</html>
