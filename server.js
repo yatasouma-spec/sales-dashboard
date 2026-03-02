@@ -68,7 +68,8 @@ if (DATABASE_URL) {
       await pool.query(`CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, date TEXT NOT NULL, month TEXT NOT NULL, client_name TEXT NOT NULL, closer TEXT NOT NULL, product_price INTEGER NOT NULL, status TEXT NOT NULL, loss_reason TEXT DEFAULT '', has_follow_up BOOLEAN DEFAULT FALSE, payment_method TEXT DEFAULT 'card_once', created_by TEXT)`);
       await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'card_once'`);
       await pool.query(`CREATE TABLE IF NOT EXISTS kpi_goals (week_key TEXT PRIMARY KEY, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0)`);
-      await pool.query(`CREATE TABLE IF NOT EXISTS user_kpi_goals (week_key TEXT NOT NULL, user_id TEXT NOT NULL, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0, PRIMARY KEY (week_key, user_id))`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS user_kpi_goals (week_key TEXT NOT NULL, user_id TEXT NOT NULL, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0, result_status TEXT NOT NULL DEFAULT 'auto', PRIMARY KEY (week_key, user_id))`);
+      await pool.query(`ALTER TABLE user_kpi_goals ADD COLUMN IF NOT EXISTS result_status TEXT NOT NULL DEFAULT 'auto'`);
       const { rows } = await pool.query('SELECT COUNT(*) FROM users');
       if (parseInt(rows[0].count) === 0) {
         const hash = bcrypt.hashSync('admin123', 10);
@@ -103,16 +104,16 @@ if (DATABASE_URL) {
       return { weekKey, closedTarget, rateTarget };
     },
     async getUserKpiGoalByWeek(weekKey, userId) {
-      const { rows } = await pool.query('SELECT week_key, user_id, closed_target, rate_target FROM user_kpi_goals WHERE week_key=$1 AND user_id=$2', [weekKey, userId]);
-      if (!rows[0]) return { weekKey, userId, closedTarget: 0, rateTarget: 0 };
-      return { weekKey: rows[0].week_key, userId: rows[0].user_id, closedTarget: parseInt(rows[0].closed_target, 10) || 0, rateTarget: parseFloat(rows[0].rate_target) || 0 };
+      const { rows } = await pool.query('SELECT week_key, user_id, closed_target, rate_target, result_status FROM user_kpi_goals WHERE week_key=$1 AND user_id=$2', [weekKey, userId]);
+      if (!rows[0]) return { weekKey, userId, closedTarget: 0, rateTarget: 0, resultStatus: 'auto' };
+      return { weekKey: rows[0].week_key, userId: rows[0].user_id, closedTarget: parseInt(rows[0].closed_target, 10) || 0, rateTarget: parseFloat(rows[0].rate_target) || 0, resultStatus: rows[0].result_status || 'auto' };
     },
-    async upsertUserKpiGoal(weekKey, userId, closedTarget, rateTarget) {
+    async upsertUserKpiGoal(weekKey, userId, closedTarget, rateTarget, resultStatus = 'auto') {
       await pool.query(
-        'INSERT INTO user_kpi_goals (week_key, user_id, closed_target, rate_target) VALUES ($1,$2,$3,$4) ON CONFLICT (week_key, user_id) DO UPDATE SET closed_target=EXCLUDED.closed_target, rate_target=EXCLUDED.rate_target',
-        [weekKey, userId, closedTarget, rateTarget]
+        'INSERT INTO user_kpi_goals (week_key, user_id, closed_target, rate_target, result_status) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (week_key, user_id) DO UPDATE SET closed_target=EXCLUDED.closed_target, rate_target=EXCLUDED.rate_target, result_status=EXCLUDED.result_status',
+        [weekKey, userId, closedTarget, rateTarget, resultStatus]
       );
-      return { weekKey, userId, closedTarget, rateTarget };
+      return { weekKey, userId, closedTarget, rateTarget, resultStatus };
     }
   };
   console.log('PostgreSQLモードで起動');
@@ -169,13 +170,13 @@ if (DATABASE_URL) {
     },
     async getUserKpiGoalByWeek(weekKey, userId) {
       const g = readDB().userKpiGoals.find(x => x.weekKey === weekKey && x.userId === userId);
-      if (!g) return { weekKey, userId, closedTarget: 0, rateTarget: 0 };
-      return { weekKey, userId, closedTarget: parseInt(g.closedTarget, 10) || 0, rateTarget: parseFloat(g.rateTarget) || 0 };
+      if (!g) return { weekKey, userId, closedTarget: 0, rateTarget: 0, resultStatus: 'auto' };
+      return { weekKey, userId, closedTarget: parseInt(g.closedTarget, 10) || 0, rateTarget: parseFloat(g.rateTarget) || 0, resultStatus: g.resultStatus || 'auto' };
     },
-    async upsertUserKpiGoal(weekKey, userId, closedTarget, rateTarget) {
+    async upsertUserKpiGoal(weekKey, userId, closedTarget, rateTarget, resultStatus = 'auto') {
       const d = readDB();
       const idx = d.userKpiGoals.findIndex(x => x.weekKey === weekKey && x.userId === userId);
-      const payload = { weekKey, userId, closedTarget, rateTarget };
+      const payload = { weekKey, userId, closedTarget, rateTarget, resultStatus };
       if (idx === -1) d.userKpiGoals.push(payload);
       else d.userKpiGoals[idx] = payload;
       writeDB(d);
@@ -297,11 +298,12 @@ app.get('/api/my-kpi-goal/:weekKey', requireAuth, async (req, res) => {
 
 app.put('/api/my-kpi-goal/:weekKey', requireAuth, async (req, res) => {
   try {
-    const { closedTarget, rateTarget } = req.body;
+    const { closedTarget, rateTarget, resultStatus } = req.body;
     const targetUserId = (req.session.role === 'admin' && req.query.userId) ? req.query.userId : req.session.userId;
     const normalizedClosed = Math.max(0, parseInt(closedTarget, 10) || 0);
     const normalizedRate = Math.max(0, Math.min(100, parseFloat(rateTarget) || 0));
-    const goal = await db.upsertUserKpiGoal(req.params.weekKey, targetUserId, normalizedClosed, normalizedRate);
+    const normalizedStatus = ['auto', 'achieved', 'not_achieved'].includes(resultStatus) ? resultStatus : 'auto';
+    const goal = await db.upsertUserKpiGoal(req.params.weekKey, targetUserId, normalizedClosed, normalizedRate, normalizedStatus);
     res.json(goal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
