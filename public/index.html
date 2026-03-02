@@ -176,6 +176,7 @@
 
     <div id="tab-deals" class="tab-panel active"></div>
     <div id="tab-closers" class="tab-panel"></div>
+    <div id="tab-personal-kpi" class="tab-panel"></div>
     <div id="tab-loss" class="tab-panel"></div>
     <div id="tab-settings" class="tab-panel"></div>
   </div>
@@ -324,7 +325,8 @@
       editingId: null,
       user: null,
       kpiWeekKey: getCurrentWeekKey(),
-      kpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 }
+      kpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 },
+      myKpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 }
     };
 
     // ===== API Helper =====
@@ -416,6 +418,7 @@
       let tabs = `
         <button class="tab-btn active" data-tab="deals" onclick="switchTab('deals')">商談一覧</button>
         <button class="tab-btn" data-tab="closers" onclick="switchTab('closers')">クローザー分析</button>
+        <button class="tab-btn" data-tab="personal-kpi" onclick="switchTab('personal-kpi')">個人KPI</button>
         <button class="tab-btn" data-tab="loss" onclick="switchTab('loss')">失注理由分析</button>
       `;
       if (isAdmin()) tabs += `<button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">設定</button>`;
@@ -442,11 +445,13 @@
       document.getElementById('monthLabel').textContent = formatMonth(state.currentMonth);
       const data = await api('GET', `/api/dashboard?month=${state.currentMonth}&weekKey=${encodeURIComponent(state.kpiWeekKey)}`);
       if (!data) return;
-      const { deals, prevDeals, closers, kpiGoal } = data;
+      const { deals, prevDeals, closers, kpiGoal, myKpiGoal } = data;
       state.kpiGoal = kpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0 };
+      state.myKpiGoal = myKpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0 };
       renderKPIs(deals);
       renderDeals(deals, closers);
       renderClosers(deals, closers);
+      renderPersonalKpi(deals);
       renderLoss(deals, prevDeals);
       if (isAdmin()) renderSettings(closers);
     }
@@ -522,6 +527,48 @@
       panel.innerHTML = `<h2 style="margin-bottom:16px">クローザー分析</h2><div class="table-wrap"><table><thead><tr><th>クローザー</th><th>商談数</th><th>成約</th><th>失注</th><th>検討</th><th>成約率</th><th>売上貢献</th><th>報酬（30%+振込加算）</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
 
+    function renderPersonalKpi(deals) {
+      const panel = document.getElementById('tab-personal-kpi');
+      const myDeals = deals.filter(d => d.closer === state.user.displayName && getWeekKeyByDate(new Date(d.date)) === state.kpiWeekKey);
+      const myClosed = myDeals.filter(d => d.status === 'closed').length;
+      const myLost = myDeals.filter(d => d.status === 'lost').length;
+      const myRate = (myClosed + myLost) > 0 ? (myClosed / (myClosed + myLost) * 100) : 0;
+      const goalClosed = state.myKpiGoal.closedTarget || 0;
+      const goalRate = state.myKpiGoal.rateTarget || 0;
+      const closedAchieved = goalClosed > 0 && myClosed >= goalClosed;
+      const rateAchieved = goalRate > 0 && myRate >= goalRate;
+      const allAchieved = (goalClosed > 0 || goalRate > 0) ? (closedAchieved && rateAchieved) : false;
+      panel.innerHTML = `
+        <div class="analysis-card">
+          <h3>個人KPI（${esc(state.user.displayName)}）</h3>
+          <div class="add-row">
+            <input type="week" id="myKpiWeekInput" value="${toWeekInputValue(state.kpiWeekKey)}" onchange="onKpiWeekChange(this.value)">
+            <input type="number" id="myKpiClosedTargetInput" min="0" step="1" value="${goalClosed}" placeholder="成約件数目標">
+            <input type="number" id="myKpiRateTargetInput" min="0" max="100" step="0.1" value="${goalRate.toFixed(1)}" placeholder="成約率目標(%)">
+            <button class="btn btn-primary" onclick="saveMyWeeklyKpiGoal()">保存</button>
+          </div>
+          <p style="color:#64748b;font-size:13px;">対象週: ${formatWeekLabel(state.kpiWeekKey)}</p>
+        </div>
+        <div class="kpi-row">
+          <div class="kpi-card kpi-green">
+            <div class="kpi-label">成約件数（個人）</div>
+            <div class="kpi-value">${myClosed}件</div>
+            <div class="kpi-sub">目標 ${goalClosed}件 / 判定: ${goalClosed === 0 ? '目標未設定' : (closedAchieved ? '達成' : '未達')}</div>
+          </div>
+          <div class="kpi-card kpi-blue">
+            <div class="kpi-label">成約率（個人）</div>
+            <div class="kpi-value">${myRate.toFixed(1)}%</div>
+            <div class="kpi-sub">目標 ${goalRate.toFixed(1)}% / 判定: ${goalRate === 0 ? '目標未設定' : (rateAchieved ? '達成' : '未達')}</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">総合判定</div>
+            <div class="kpi-value" style="font-size:24px;${allAchieved ? 'color:#10b981' : 'color:#ef4444'}">${allAchieved ? '達成' : '未達'}</div>
+            <div class="kpi-sub">母数: 成約 ${myClosed}件 / 失注 ${myLost}件</div>
+          </div>
+        </div>
+      `;
+    }
+
     // ===== Loss Analysis =====
     function renderLoss(deals, prevDeals) {
       const panel = document.getElementById('tab-loss');
@@ -585,6 +632,7 @@
           <div class="export-row">
             <button class="btn btn-secondary" onclick="exportCSV()">CSV出力（今月）</button>
           </div>
+          <p style="color:#64748b;font-size:13px;margin-top:8px;">過去の月次データは削除しない限り保持され、月切り替えでいつでも参照できます。</p>
         </div>
         <div class="settings-section">
           <h3>週次KPI設定</h3>
@@ -733,6 +781,15 @@
       await api('PUT', `/api/kpi-goals/${encodeURIComponent(weekKey)}`, { closedTarget, rateTarget });
       await render();
       alert('週次KPIを保存しました。');
+    }
+    async function saveMyWeeklyKpiGoal() {
+      const weekKey = document.getElementById('myKpiWeekInput')?.value || state.kpiWeekKey;
+      const closedTarget = parseInt(document.getElementById('myKpiClosedTargetInput')?.value || '0', 10) || 0;
+      const rateTarget = parseFloat(document.getElementById('myKpiRateTargetInput')?.value || '0') || 0;
+      state.kpiWeekKey = weekKey;
+      await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(weekKey)}`, { closedTarget, rateTarget });
+      await render();
+      alert('個人KPIを保存しました。');
     }
 
     // ===== User Management =====

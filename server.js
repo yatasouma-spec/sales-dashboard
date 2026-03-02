@@ -68,6 +68,7 @@ if (DATABASE_URL) {
       await pool.query(`CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, date TEXT NOT NULL, month TEXT NOT NULL, client_name TEXT NOT NULL, closer TEXT NOT NULL, product_price INTEGER NOT NULL, status TEXT NOT NULL, loss_reason TEXT DEFAULT '', has_follow_up BOOLEAN DEFAULT FALSE, payment_method TEXT DEFAULT 'card_once', created_by TEXT)`);
       await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'card_once'`);
       await pool.query(`CREATE TABLE IF NOT EXISTS kpi_goals (week_key TEXT PRIMARY KEY, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0)`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS user_kpi_goals (week_key TEXT NOT NULL, user_id TEXT NOT NULL, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0, PRIMARY KEY (week_key, user_id))`);
       const { rows } = await pool.query('SELECT COUNT(*) FROM users');
       if (parseInt(rows[0].count) === 0) {
         const hash = bcrypt.hashSync('admin123', 10);
@@ -100,6 +101,18 @@ if (DATABASE_URL) {
         [weekKey, closedTarget, rateTarget]
       );
       return { weekKey, closedTarget, rateTarget };
+    },
+    async getUserKpiGoalByWeek(weekKey, userId) {
+      const { rows } = await pool.query('SELECT week_key, user_id, closed_target, rate_target FROM user_kpi_goals WHERE week_key=$1 AND user_id=$2', [weekKey, userId]);
+      if (!rows[0]) return { weekKey, userId, closedTarget: 0, rateTarget: 0 };
+      return { weekKey: rows[0].week_key, userId: rows[0].user_id, closedTarget: parseInt(rows[0].closed_target, 10) || 0, rateTarget: parseFloat(rows[0].rate_target) || 0 };
+    },
+    async upsertUserKpiGoal(weekKey, userId, closedTarget, rateTarget) {
+      await pool.query(
+        'INSERT INTO user_kpi_goals (week_key, user_id, closed_target, rate_target) VALUES ($1,$2,$3,$4) ON CONFLICT (week_key, user_id) DO UPDATE SET closed_target=EXCLUDED.closed_target, rate_target=EXCLUDED.rate_target',
+        [weekKey, userId, closedTarget, rateTarget]
+      );
+      return { weekKey, userId, closedTarget, rateTarget };
     }
   };
   console.log('PostgreSQLモードで起動');
@@ -111,6 +124,7 @@ if (DATABASE_URL) {
   function readDB() {
     const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
     if (!Array.isArray(data.kpiGoals)) data.kpiGoals = [];
+    if (!Array.isArray(data.userKpiGoals)) data.userKpiGoals = [];
     if (Array.isArray(data.deals)) data.deals = data.deals.map(d => ({ ...d, paymentMethod: d.paymentMethod || 'card_once' }));
     return data;
   }
@@ -121,7 +135,7 @@ if (DATABASE_URL) {
       if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
       if (!fs.existsSync(DB_PATH)) {
         const hash = bcrypt.hashSync('admin123', 10);
-        writeDB({ users: [{ id: generateId(), username: 'admin', password: hash, displayName: '管理者', role: 'admin' }], closers: [], deals: [], kpiGoals: [] });
+        writeDB({ users: [{ id: generateId(), username: 'admin', password: hash, displayName: '管理者', role: 'admin' }], closers: [], deals: [], kpiGoals: [], userKpiGoals: [] });
         console.log('初期データベースを作成 (admin / admin123)');
       }
     },
@@ -150,6 +164,20 @@ if (DATABASE_URL) {
       const payload = { weekKey, closedTarget, rateTarget };
       if (idx === -1) d.kpiGoals.push(payload);
       else d.kpiGoals[idx] = payload;
+      writeDB(d);
+      return payload;
+    },
+    async getUserKpiGoalByWeek(weekKey, userId) {
+      const g = readDB().userKpiGoals.find(x => x.weekKey === weekKey && x.userId === userId);
+      if (!g) return { weekKey, userId, closedTarget: 0, rateTarget: 0 };
+      return { weekKey, userId, closedTarget: parseInt(g.closedTarget, 10) || 0, rateTarget: parseFloat(g.rateTarget) || 0 };
+    },
+    async upsertUserKpiGoal(weekKey, userId, closedTarget, rateTarget) {
+      const d = readDB();
+      const idx = d.userKpiGoals.findIndex(x => x.weekKey === weekKey && x.userId === userId);
+      const payload = { weekKey, userId, closedTarget, rateTarget };
+      if (idx === -1) d.userKpiGoals.push(payload);
+      else d.userKpiGoals[idx] = payload;
       writeDB(d);
       return payload;
     }
@@ -206,7 +234,8 @@ app.get('/api/dashboard', requireAuth, async (req, res) => {
       db.getDealsByMonth(month), db.getDealsByMonth(getPrevMonth(month)), db.getClosers()
     ]);
     const kpiGoal = await db.getKpiGoalByWeek(weekKey);
-    res.json({ deals, prevDeals, closers, kpiGoal });
+    const myKpiGoal = await db.getUserKpiGoalByWeek(weekKey, req.session.userId);
+    res.json({ deals, prevDeals, closers, kpiGoal, myKpiGoal });
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
 
@@ -239,6 +268,16 @@ app.put('/api/kpi-goals/:weekKey', requireAdmin, async (req, res) => {
     const normalizedClosed = Math.max(0, parseInt(closedTarget, 10) || 0);
     const normalizedRate = Math.max(0, Math.min(100, parseFloat(rateTarget) || 0));
     const goal = await db.upsertKpiGoal(req.params.weekKey, normalizedClosed, normalizedRate);
+    res.json(goal);
+  } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
+});
+
+app.put('/api/my-kpi-goal/:weekKey', requireAuth, async (req, res) => {
+  try {
+    const { closedTarget, rateTarget } = req.body;
+    const normalizedClosed = Math.max(0, parseInt(closedTarget, 10) || 0);
+    const normalizedRate = Math.max(0, Math.min(100, parseFloat(rateTarget) || 0));
+    const goal = await db.upsertUserKpiGoal(req.params.weekKey, req.session.userId, normalizedClosed, normalizedRate);
     res.json(goal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
