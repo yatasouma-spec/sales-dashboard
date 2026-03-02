@@ -10,6 +10,13 @@ const SESSION_SECRET = process.env.SESSION_SECRET || 'sales-dashboard-2026-key';
 const DATABASE_URL = process.env.DATABASE_URL;
 const COMMISSION_RATE = 0.175;
 const CLOSER_RATE = 0.30;
+const BANK_ONCE_INCENTIVE = 1000;
+const PAYMENT_METHOD_LABELS = {
+  card_once: 'クレカ一括',
+  card_installment: 'クレカ分割',
+  card_bank_mix: 'クレカと銀行振込',
+  bank_once: '銀行振込一括'
+};
 
 // --- Middleware ---
 if (DATABASE_URL) app.set('trust proxy', 1);
@@ -32,6 +39,14 @@ function getPrevMonth(month) {
   const d = new Date(y, m - 2, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
+function getISOWeekKey(date = new Date()) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
 
 // ============================================================
 // Database Abstraction - JSON File or PostgreSQL
@@ -44,13 +59,15 @@ if (DATABASE_URL) {
   const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
   function mapUser(r) { return { id: r.id, username: r.username, password: r.password, displayName: r.display_name, role: r.role }; }
-  function mapDeal(r) { return { id: r.id, date: r.date, month: r.month, clientName: r.client_name, closer: r.closer, productPrice: r.product_price, status: r.status, lossReason: r.loss_reason, hasFollowUp: r.has_follow_up, createdBy: r.created_by }; }
+  function mapDeal(r) { return { id: r.id, date: r.date, month: r.month, clientName: r.client_name, closer: r.closer, productPrice: r.product_price, status: r.status, lossReason: r.loss_reason, hasFollowUp: r.has_follow_up, paymentMethod: r.payment_method || 'card_once', createdBy: r.created_by }; }
 
   db = {
     async init() {
       await pool.query(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'closer')`);
       await pool.query(`CREATE TABLE IF NOT EXISTS closers (name TEXT PRIMARY KEY)`);
-      await pool.query(`CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, date TEXT NOT NULL, month TEXT NOT NULL, client_name TEXT NOT NULL, closer TEXT NOT NULL, product_price INTEGER NOT NULL, status TEXT NOT NULL, loss_reason TEXT DEFAULT '', has_follow_up BOOLEAN DEFAULT FALSE, created_by TEXT)`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, date TEXT NOT NULL, month TEXT NOT NULL, client_name TEXT NOT NULL, closer TEXT NOT NULL, product_price INTEGER NOT NULL, status TEXT NOT NULL, loss_reason TEXT DEFAULT '', has_follow_up BOOLEAN DEFAULT FALSE, payment_method TEXT DEFAULT 'card_once', created_by TEXT)`);
+      await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'card_once'`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS kpi_goals (week_key TEXT PRIMARY KEY, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0)`);
       const { rows } = await pool.query('SELECT COUNT(*) FROM users');
       if (parseInt(rows[0].count) === 0) {
         const hash = bcrypt.hashSync('admin123', 10);
@@ -69,9 +86,21 @@ if (DATABASE_URL) {
     async closerExists(name) { const { rows } = await pool.query('SELECT 1 FROM closers WHERE name=$1', [name]); return rows.length > 0; },
     async getDealsByMonth(month) { const { rows } = await pool.query('SELECT * FROM deals WHERE month=$1 ORDER BY date DESC', [month]); return rows.map(mapDeal); },
     async getDealById(id) { const { rows } = await pool.query('SELECT * FROM deals WHERE id=$1', [id]); return rows[0] ? mapDeal(rows[0]) : null; },
-    async addDeal(d) { await pool.query('INSERT INTO deals (id,date,month,client_name,closer,product_price,status,loss_reason,has_follow_up,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', [d.id, d.date, d.month, d.clientName, d.closer, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.createdBy]); return d; },
-    async updateDeal(id, d) { await pool.query('UPDATE deals SET date=$1,month=$2,client_name=$3,closer=$4,product_price=$5,status=$6,loss_reason=$7,has_follow_up=$8 WHERE id=$9', [d.date, d.month, d.clientName, d.closer, d.productPrice, d.status, d.lossReason, d.hasFollowUp, id]); },
-    async deleteDeal(id) { await pool.query('DELETE FROM deals WHERE id=$1', [id]); }
+    async addDeal(d) { await pool.query('INSERT INTO deals (id,date,month,client_name,closer,product_price,status,loss_reason,has_follow_up,payment_method,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [d.id, d.date, d.month, d.clientName, d.closer, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', d.createdBy]); return d; },
+    async updateDeal(id, d) { await pool.query('UPDATE deals SET date=$1,month=$2,client_name=$3,closer=$4,product_price=$5,status=$6,loss_reason=$7,has_follow_up=$8,payment_method=$9 WHERE id=$10', [d.date, d.month, d.clientName, d.closer, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', id]); },
+    async deleteDeal(id) { await pool.query('DELETE FROM deals WHERE id=$1', [id]); },
+    async getKpiGoalByWeek(weekKey) {
+      const { rows } = await pool.query('SELECT week_key, closed_target, rate_target FROM kpi_goals WHERE week_key=$1', [weekKey]);
+      if (!rows[0]) return { weekKey, closedTarget: 0, rateTarget: 0 };
+      return { weekKey: rows[0].week_key, closedTarget: parseInt(rows[0].closed_target, 10) || 0, rateTarget: parseFloat(rows[0].rate_target) || 0 };
+    },
+    async upsertKpiGoal(weekKey, closedTarget, rateTarget) {
+      await pool.query(
+        'INSERT INTO kpi_goals (week_key, closed_target, rate_target) VALUES ($1,$2,$3) ON CONFLICT (week_key) DO UPDATE SET closed_target=EXCLUDED.closed_target, rate_target=EXCLUDED.rate_target',
+        [weekKey, closedTarget, rateTarget]
+      );
+      return { weekKey, closedTarget, rateTarget };
+    }
   };
   console.log('PostgreSQLモードで起動');
 
@@ -79,7 +108,12 @@ if (DATABASE_URL) {
   // ---- JSON File Mode (ローカル開発用) ----
   const DATA_DIR = path.join(__dirname, 'data');
   const DB_PATH = path.join(DATA_DIR, 'db.json');
-  function readDB() { return JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); }
+  function readDB() {
+    const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    if (!Array.isArray(data.kpiGoals)) data.kpiGoals = [];
+    if (Array.isArray(data.deals)) data.deals = data.deals.map(d => ({ ...d, paymentMethod: d.paymentMethod || 'card_once' }));
+    return data;
+  }
   function writeDB(data) { fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8'); }
 
   db = {
@@ -87,7 +121,7 @@ if (DATABASE_URL) {
       if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
       if (!fs.existsSync(DB_PATH)) {
         const hash = bcrypt.hashSync('admin123', 10);
-        writeDB({ users: [{ id: generateId(), username: 'admin', password: hash, displayName: '管理者', role: 'admin' }], closers: [], deals: [] });
+        writeDB({ users: [{ id: generateId(), username: 'admin', password: hash, displayName: '管理者', role: 'admin' }], closers: [], deals: [], kpiGoals: [] });
         console.log('初期データベースを作成 (admin / admin123)');
       }
     },
@@ -104,7 +138,21 @@ if (DATABASE_URL) {
     async getDealById(id) { return readDB().deals.find(d => d.id === id) || null; },
     async addDeal(deal) { const d = readDB(); d.deals.push(deal); writeDB(d); return deal; },
     async updateDeal(id, updates) { const d = readDB(); const idx = d.deals.findIndex(x => x.id === id); if (idx !== -1) { d.deals[idx] = { ...d.deals[idx], ...updates, id }; writeDB(d); } },
-    async deleteDeal(id) { const d = readDB(); d.deals = d.deals.filter(x => x.id !== id); writeDB(d); }
+    async deleteDeal(id) { const d = readDB(); d.deals = d.deals.filter(x => x.id !== id); writeDB(d); },
+    async getKpiGoalByWeek(weekKey) {
+      const g = readDB().kpiGoals.find(x => x.weekKey === weekKey);
+      if (!g) return { weekKey, closedTarget: 0, rateTarget: 0 };
+      return { weekKey, closedTarget: parseInt(g.closedTarget, 10) || 0, rateTarget: parseFloat(g.rateTarget) || 0 };
+    },
+    async upsertKpiGoal(weekKey, closedTarget, rateTarget) {
+      const d = readDB();
+      const idx = d.kpiGoals.findIndex(x => x.weekKey === weekKey);
+      const payload = { weekKey, closedTarget, rateTarget };
+      if (idx === -1) d.kpiGoals.push(payload);
+      else d.kpiGoals[idx] = payload;
+      writeDB(d);
+      return payload;
+    }
   };
   console.log('JSONファイルモードで起動');
 }
@@ -153,10 +201,12 @@ app.get('/api/me', requireAuth, async (req, res) => {
 app.get('/api/dashboard', requireAuth, async (req, res) => {
   try {
     const month = req.query.month || getCurrentMonth();
+    const weekKey = req.query.weekKey || getISOWeekKey();
     const [deals, prevDeals, closers] = await Promise.all([
       db.getDealsByMonth(month), db.getDealsByMonth(getPrevMonth(month)), db.getClosers()
     ]);
-    res.json({ deals, prevDeals, closers });
+    const kpiGoal = await db.getKpiGoalByWeek(weekKey);
+    res.json({ deals, prevDeals, closers, kpiGoal });
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
 
@@ -165,9 +215,9 @@ app.get('/api/dashboard', requireAuth, async (req, res) => {
 // ============================================================
 app.post('/api/deals', requireAuth, async (req, res) => {
   try {
-    const { date, month, clientName, closer, productPrice, status, lossReason, hasFollowUp } = req.body;
+    const { date, month, clientName, closer, productPrice, status, lossReason, hasFollowUp, paymentMethod } = req.body;
     if (!date || !clientName || !closer || !productPrice || !status) return res.status(400).json({ error: '必須項目を入力してください' });
-    const deal = { id: generateId(), date, month, clientName, closer, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, createdBy: req.session.userId };
+    const deal = { id: generateId(), date, month, clientName, closer, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', createdBy: req.session.userId };
     await db.addDeal(deal);
     res.json(deal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
@@ -177,9 +227,19 @@ app.put('/api/deals/:id', requireAdmin, async (req, res) => {
   try {
     const existing = await db.getDealById(req.params.id);
     if (!existing) return res.status(404).json({ error: '商談が見つかりません' });
-    const { date, month, clientName, closer, productPrice, status, lossReason, hasFollowUp } = req.body;
-    await db.updateDeal(req.params.id, { date, month, clientName, closer, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp });
+    const { date, month, clientName, closer, productPrice, status, lossReason, hasFollowUp, paymentMethod } = req.body;
+    await db.updateDeal(req.params.id, { date, month, clientName, closer, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once' });
     res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
+});
+
+app.put('/api/kpi-goals/:weekKey', requireAdmin, async (req, res) => {
+  try {
+    const { closedTarget, rateTarget } = req.body;
+    const normalizedClosed = Math.max(0, parseInt(closedTarget, 10) || 0);
+    const normalizedRate = Math.max(0, Math.min(100, parseFloat(rateTarget) || 0));
+    const goal = await db.upsertKpiGoal(req.params.weekKey, normalizedClosed, normalizedRate);
+    res.json(goal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
 
@@ -246,12 +306,14 @@ app.get('/api/export/csv', requireAdmin, async (req, res) => {
   try {
     const month = req.query.month || getCurrentMonth();
     const deals = await db.getDealsByMonth(month);
-    const headers = ['日付', '商談相手', 'クローザー', '商材単価', '状況', '失注理由', '再面談', '成約単価', 'クローザー報酬'];
+    const headers = ['日付', '商談相手', 'クローザー', '商材単価', '支払い手段', '状況', '失注理由', '再面談', '成約単価', 'クローザー報酬'];
     const rows = deals.map(d => {
       const sl = d.status === 'closed' ? '成約' : d.status === 'lost' ? '失注' : '検討';
+      const payment = d.paymentMethod || 'card_once';
+      const incentive = d.status === 'closed' && payment === 'bank_once' ? BANK_ONCE_INCENTIVE : 0;
       const comm = d.status === 'closed' ? d.productPrice * COMMISSION_RATE : 0;
-      const comp = d.status === 'closed' ? comm * CLOSER_RATE : 0;
-      return [d.date, d.clientName, d.closer, d.productPrice, sl, d.lossReason || '', d.hasFollowUp ? 'あり' : 'なし', comm, comp];
+      const comp = d.status === 'closed' ? Math.round(comm * CLOSER_RATE) + incentive : 0;
+      return [d.date, d.clientName, d.closer, d.productPrice, PAYMENT_METHOD_LABELS[payment] || payment, sl, d.lossReason || '', d.hasFollowUp ? 'あり' : 'なし', comm, comp];
     });
     const csv = '\uFEFF' + [headers, ...rows].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');

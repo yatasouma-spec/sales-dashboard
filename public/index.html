@@ -204,9 +204,19 @@
           <div class="form-group">
             <label>商材単価</label>
             <select name="productPrice" id="fPrice" required>
+              <option value="150000">15万円</option>
               <option value="200000">20万円</option>
               <option value="250000">25万円</option>
               <option value="300000">30万円</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>支払い手段</label>
+            <select name="paymentMethod" id="fPaymentMethod" required>
+              <option value="card_once">クレカ一括</option>
+              <option value="card_installment">クレカ分割</option>
+              <option value="card_bank_mix">クレカと銀行振込</option>
+              <option value="bank_once">銀行振込一括</option>
             </select>
           </div>
           <div class="form-group">
@@ -290,6 +300,13 @@
     // ===== Constants =====
     const COMMISSION_RATE = 0.175;
     const CLOSER_RATE = 0.30;
+    const BANK_ONCE_INCENTIVE = 1000;
+    const PAYMENT_METHOD_LABELS = {
+      card_once: 'クレカ一括',
+      card_installment: 'クレカ分割',
+      card_bank_mix: 'クレカと銀行振込',
+      bank_once: '銀行振込一括'
+    };
     const LOSS_REASONS_LIST = ['予算不足','タイミングが合わない','他社に決定','ニーズ不一致','決裁者不在','連絡不通','その他'];
     const RECOMMENDATIONS = {
       '予算不足': '価格交渉や分割払いの提案を検討してください。',
@@ -301,7 +318,14 @@
     };
 
     // ===== State =====
-    let state = { currentMonth: getCurrentMonthKey(), activeTab: 'deals', editingId: null, user: null };
+    let state = {
+      currentMonth: getCurrentMonthKey(),
+      activeTab: 'deals',
+      editingId: null,
+      user: null,
+      kpiWeekKey: getCurrentWeekKey(),
+      kpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 }
+    };
 
     // ===== API Helper =====
     async function api(method, url, body) {
@@ -324,6 +348,46 @@
       const [y,m] = key.split('-').map(Number);
       const d = new Date(y, m-2, 1);
       return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    }
+    function getWeekKeyByDate(date) {
+      const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayNum = d.getUTCDay() || 7;
+      d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+      return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2,'0')}`;
+    }
+    function getCurrentWeekKey() { return getWeekKeyByDate(new Date()); }
+    function toWeekInputValue(weekKey) {
+      const m = /^(\d{4})-W(\d{2})$/.exec(weekKey || '');
+      return m ? `${m[1]}-W${m[2]}` : getCurrentWeekKey();
+    }
+    function getWeekStartDate(weekKey) {
+      const m = /^(\d{4})-W(\d{2})$/.exec(weekKey || '');
+      if (!m) return null;
+      const year = Number(m[1]);
+      const week = Number(m[2]);
+      const jan4 = new Date(Date.UTC(year, 0, 4));
+      const jan4Day = jan4.getUTCDay() || 7;
+      const monday = new Date(jan4);
+      monday.setUTCDate(jan4.getUTCDate() - jan4Day + 1 + (week - 1) * 7);
+      return monday;
+    }
+    function formatWeekLabel(weekKey) {
+      const d = getWeekStartDate(weekKey);
+      if (!d) return weekKey;
+      const m = d.getUTCMonth() + 1;
+      const day = d.getUTCDate();
+      return `${weekKey}（${m}/${day}週）`;
+    }
+    function getDealCommission(deal) {
+      if (deal.status !== 'closed') return 0;
+      return deal.productPrice * COMMISSION_RATE;
+    }
+    function getDealCloserCompensation(deal) {
+      if (deal.status !== 'closed') return 0;
+      const incentive = deal.paymentMethod === 'bank_once' ? BANK_ONCE_INCENTIVE : 0;
+      return Math.round(getDealCommission(deal) * CLOSER_RATE) + incentive;
     }
     function formatCurrency(n) { return '¥' + n.toLocaleString(); }
     function esc(str) { const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
@@ -376,9 +440,10 @@
     // ===== Main Render =====
     async function render() {
       document.getElementById('monthLabel').textContent = formatMonth(state.currentMonth);
-      const data = await api('GET', `/api/dashboard?month=${state.currentMonth}`);
+      const data = await api('GET', `/api/dashboard?month=${state.currentMonth}&weekKey=${encodeURIComponent(state.kpiWeekKey)}`);
       if (!data) return;
-      const { deals, prevDeals, closers } = data;
+      const { deals, prevDeals, closers, kpiGoal } = data;
+      state.kpiGoal = kpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0 };
       renderKPIs(deals);
       renderDeals(deals, closers);
       renderClosers(deals, closers);
@@ -392,14 +457,22 @@
       const lost = deals.filter(d => d.status === 'lost');
       const considering = deals.filter(d => d.status === 'considering');
       const followUps = deals.filter(d => d.hasFollowUp);
-      const totalSales = closed.reduce((s,d) => s + d.productPrice * COMMISSION_RATE, 0);
+      const totalSales = closed.reduce((s,d) => s + getDealCommission(d), 0);
       const decided = closed.length + lost.length;
       const rate = decided > 0 ? (closed.length / decided * 100) : 0;
+      const weekDeals = deals.filter(d => getWeekKeyByDate(new Date(d.date)) === state.kpiWeekKey);
+      const weekClosed = weekDeals.filter(d => d.status === 'closed').length;
+      const weekLost = weekDeals.filter(d => d.status === 'lost').length;
+      const weekRate = (weekClosed + weekLost) > 0 ? (weekClosed / (weekClosed + weekLost) * 100) : 0;
+      const closedTarget = state.kpiGoal.closedTarget || 0;
+      const rateTarget = state.kpiGoal.rateTarget || 0;
+      const closedProgress = closedTarget > 0 ? (weekClosed / closedTarget * 100) : 0;
+      const rateGap = weekRate - rateTarget;
       document.getElementById('kpiRow').innerHTML = `
         <div class="kpi-card"><div class="kpi-label">会社売上</div><div class="kpi-value">${formatCurrency(totalSales)}</div><div class="kpi-sub">成約単価合計（商材×17.5%）</div></div>
-        <div class="kpi-card kpi-green"><div class="kpi-label">成約</div><div class="kpi-value">${closed.length}件</div></div>
+        <div class="kpi-card kpi-green"><div class="kpi-label">成約</div><div class="kpi-value">${closed.length}件</div><div class="kpi-sub">週次目標 ${closedTarget}件 / 実績 ${weekClosed}件（${closedTarget > 0 ? closedProgress.toFixed(0) : 0}%）</div></div>
         <div class="kpi-card kpi-red"><div class="kpi-label">失注</div><div class="kpi-value">${lost.length}件</div></div>
-        <div class="kpi-card kpi-blue"><div class="kpi-label">成約率</div><div class="kpi-value">${rate.toFixed(1)}%</div><div class="kpi-sub">成約÷（成約+失注）</div></div>
+        <div class="kpi-card kpi-blue"><div class="kpi-label">成約率</div><div class="kpi-value">${rate.toFixed(1)}%</div><div class="kpi-sub">週次目標 ${rateTarget.toFixed(1)}% / 実績 ${weekRate.toFixed(1)}%（${rateGap >= 0 ? '+' : ''}${rateGap.toFixed(1)}pt）</div></div>
         <div class="kpi-card"><div class="kpi-label">商談数</div><div class="kpi-value">${deals.length}件</div><div class="kpi-sub">検討中 ${considering.length} / 再面談 ${followUps.length}</div></div>
       `;
     }
@@ -415,15 +488,17 @@
       const rows = sorted.map(d => {
         const sl = d.status === 'closed' ? '成約' : d.status === 'lost' ? '失注' : '検討';
         const sc = d.status === 'closed' ? 'badge-closed' : d.status === 'lost' ? 'badge-lost' : 'badge-considering';
-        const comm = d.status === 'closed' ? formatCurrency(d.productPrice * COMMISSION_RATE) : '-';
+        const comm = d.status === 'closed' ? formatCurrency(getDealCommission(d)) : '-';
+        const closerComp = d.status === 'closed' ? formatCurrency(getDealCloserCompensation(d)) : '-';
+        const payment = PAYMENT_METHOD_LABELS[d.paymentMethod || 'card_once'] || '未設定';
         const actions = isAdmin() ? `<td><button class="btn btn-secondary btn-sm" onclick="editDeal('${d.id}')">編集</button> <button class="btn btn-danger btn-sm" onclick="deleteDeal('${d.id}')">削除</button></td>` : '<td></td>';
-        return `<tr><td>${d.date}</td><td>${esc(d.clientName)}</td><td>${esc(d.closer)}</td><td>${(d.productPrice/10000).toFixed(0)}万円</td><td><span class="badge ${sc}">${sl}</span></td><td>${d.status==='lost'?esc(d.lossReason):'-'}</td><td>${d.hasFollowUp?'<span class="badge badge-followup">再面談</span>':'-'}</td><td>${comm}</td>${actions}</tr>`;
+        return `<tr><td>${d.date}</td><td>${esc(d.clientName)}</td><td>${esc(d.closer)}</td><td>${(d.productPrice/10000).toFixed(0)}万円</td><td>${esc(payment)}</td><td><span class="badge ${sc}">${sl}</span></td><td>${d.status==='lost'?esc(d.lossReason):'-'}</td><td>${d.hasFollowUp?'<span class="badge badge-followup">再面談</span>':'-'}</td><td>${comm}</td><td>${closerComp}</td>${actions}</tr>`;
       }).join('');
       const actionTh = isAdmin() ? '<th>操作</th>' : '<th></th>';
       panel.innerHTML = `
         <div class="panel-header"><h2>商談一覧</h2><button class="btn btn-primary" onclick="showAddModal()">+ 商談追加</button></div>
         ${deals.length === 0 ? '<div class="empty-state"><div class="empty-icon">📋</div><p>商談データがありません。「+ 商談追加」から追加してください。</p></div>' :
-        `<div class="table-wrap"><table><thead><tr><th>日付</th><th>商談相手</th><th>クローザー</th><th>商材単価</th><th>状況</th><th>失注理由</th><th>再面談</th><th>成約単価</th>${actionTh}</tr></thead><tbody>${rows}</tbody></table></div>`}
+        `<div class="table-wrap"><table><thead><tr><th>日付</th><th>商談相手</th><th>クローザー</th><th>商材単価</th><th>支払い手段</th><th>状況</th><th>失注理由</th><th>再面談</th><th>成約単価</th><th>クローザー報酬</th>${actionTh}</tr></thead><tbody>${rows}</tbody></table></div>`}
       `;
     }
 
@@ -435,7 +510,7 @@
       deals.forEach(d => {
         if (!map[d.closer]) map[d.closer] = { name:d.closer, total:0, closed:0, lost:0, considering:0, sales:0, compensation:0 };
         const c = map[d.closer]; c.total++;
-        if (d.status==='closed') { c.closed++; c.sales+=d.productPrice*COMMISSION_RATE; c.compensation+=d.productPrice*COMMISSION_RATE*CLOSER_RATE; }
+        if (d.status==='closed') { c.closed++; c.sales += getDealCommission(d); c.compensation += getDealCloserCompensation(d); }
         else if (d.status==='lost') c.lost++; else c.considering++;
       });
       const stats = Object.values(map).map(c => ({ ...c, closingRate: (c.closed+c.lost)>0 ? c.closed/(c.closed+c.lost)*100 : 0 })).sort((a,b) => b.sales-a.sales);
@@ -444,7 +519,7 @@
         return;
       }
       const rows = stats.map(c => `<tr><td style="font-weight:600">${esc(c.name)}</td><td>${c.total}件</td><td>${c.closed}件</td><td>${c.lost}件</td><td>${c.considering}件</td><td style="font-weight:600">${c.closingRate.toFixed(1)}%</td><td>${formatCurrency(c.sales)}</td><td style="font-weight:600;color:#3b82f6">${formatCurrency(c.compensation)}</td></tr>`).join('');
-      panel.innerHTML = `<h2 style="margin-bottom:16px">クローザー分析</h2><div class="table-wrap"><table><thead><tr><th>クローザー</th><th>商談数</th><th>成約</th><th>失注</th><th>検討</th><th>成約率</th><th>売上貢献</th><th>報酬（30%）</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      panel.innerHTML = `<h2 style="margin-bottom:16px">クローザー分析</h2><div class="table-wrap"><table><thead><tr><th>クローザー</th><th>商談数</th><th>成約</th><th>失注</th><th>検討</th><th>成約率</th><th>売上貢献</th><th>報酬（30%+振込加算）</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
 
     // ===== Loss Analysis =====
@@ -512,13 +587,25 @@
           </div>
         </div>
         <div class="settings-section">
+          <h3>週次KPI設定</h3>
+          <div class="add-row">
+            <input type="week" id="kpiWeekInput" value="${toWeekInputValue(state.kpiWeekKey)}" onchange="onKpiWeekChange(this.value)">
+            <input type="number" id="kpiClosedTargetInput" min="0" step="1" value="${state.kpiGoal.closedTarget || 0}" placeholder="成約件数目標">
+            <input type="number" id="kpiRateTargetInput" min="0" max="100" step="0.1" value="${(state.kpiGoal.rateTarget || 0).toFixed(1)}" placeholder="成約率目標(%)">
+            <button class="btn btn-primary" onclick="saveWeeklyKpiGoal()">保存</button>
+          </div>
+          <p style="color:#64748b;font-size:13px;">対象週: ${formatWeekLabel(state.kpiWeekKey)}（成約件数/成約率の目標を毎週更新）</p>
+        </div>
+        <div class="settings-section">
           <h3>報酬設定（参考）</h3>
           <table style="width:auto"><thead><tr><th>商材単価</th><th>成約単価(17.5%)</th><th>クローザー報酬(30%)</th></tr></thead>
           <tbody>
+            <tr><td>15万円</td><td>${formatCurrency(150000*0.175)}</td><td>${formatCurrency(Math.round(150000*0.175*0.30))}</td></tr>
             <tr><td>20万円</td><td>${formatCurrency(200000*0.175)}</td><td>${formatCurrency(200000*0.175*0.30)}</td></tr>
             <tr><td>25万円</td><td>${formatCurrency(250000*0.175)}</td><td>${formatCurrency(250000*0.175*0.30)}</td></tr>
             <tr><td>30万円</td><td>${formatCurrency(300000*0.175)}</td><td>${formatCurrency(300000*0.175*0.30)}</td></tr>
           </tbody></table>
+          <p style="color:#64748b;font-size:13px;margin-top:8px;">銀行振込一括で成約した場合は、クローザー報酬に +${formatCurrency(BANK_ONCE_INCENTIVE)} を自動加算します。</p>
         </div>
       `;
     }
@@ -530,6 +617,7 @@
       document.getElementById('dealForm').reset();
       document.getElementById('fDate').value = new Date().toISOString().slice(0,10);
       document.getElementById('fStatus').value = 'considering';
+      document.getElementById('fPaymentMethod').value = 'card_once';
       document.getElementById('fEditId').value = '';
       onStatusChange();
       await populateCloserSelect();
@@ -548,6 +636,7 @@
       document.getElementById('fClientName').value = deal.clientName;
       document.getElementById('fCloser').value = deal.closer;
       document.getElementById('fPrice').value = deal.productPrice;
+      document.getElementById('fPaymentMethod').value = deal.paymentMethod || 'card_once';
       document.getElementById('fStatus').value = deal.status;
       document.getElementById('fFollowUp').checked = deal.hasFollowUp;
       document.getElementById('fEditId').value = deal.id;
@@ -596,6 +685,7 @@
         clientName: document.getElementById('fClientName').value.trim(),
         closer: document.getElementById('fCloser').value,
         productPrice: parseInt(document.getElementById('fPrice').value),
+        paymentMethod: document.getElementById('fPaymentMethod').value,
         status, lossReason,
         hasFollowUp: document.getElementById('fFollowUp').checked
       };
@@ -628,6 +718,21 @@
       if (!confirm(`「${name}」を削除しますか？\n※過去の商談データは残ります。`)) return;
       await api('DELETE', `/api/closers/${encodeURIComponent(name)}`);
       await render();
+    }
+
+    async function onKpiWeekChange(weekValue) {
+      if (!weekValue) return;
+      state.kpiWeekKey = weekValue;
+      await render();
+    }
+    async function saveWeeklyKpiGoal() {
+      const weekKey = document.getElementById('kpiWeekInput')?.value || state.kpiWeekKey;
+      const closedTarget = parseInt(document.getElementById('kpiClosedTargetInput')?.value || '0', 10) || 0;
+      const rateTarget = parseFloat(document.getElementById('kpiRateTargetInput')?.value || '0') || 0;
+      state.kpiWeekKey = weekKey;
+      await api('PUT', `/api/kpi-goals/${encodeURIComponent(weekKey)}`, { closedTarget, rateTarget });
+      await render();
+      alert('週次KPIを保存しました。');
     }
 
     // ===== User Management =====
