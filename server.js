@@ -272,12 +272,36 @@ app.put('/api/kpi-goals/:weekKey', requireAdmin, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
 
+app.get('/api/kpi-users', requireAuth, async (req, res) => {
+  try {
+    if (req.session.role === 'admin') {
+      const users = await db.getUsers();
+      const targets = users
+        .filter(u => u.role === 'closer' || u.role === 'admin')
+        .map(u => ({ id: u.id, displayName: u.displayName, username: u.username, role: u.role }));
+      return res.json(targets);
+    }
+    const me = await db.getUserById(req.session.userId);
+    if (!me) return res.status(404).json({ error: 'ユーザーが見つかりません' });
+    return res.json([{ id: me.id, displayName: me.displayName, username: me.username, role: me.role }]);
+  } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
+});
+
+app.get('/api/my-kpi-goal/:weekKey', requireAuth, async (req, res) => {
+  try {
+    const targetUserId = (req.session.role === 'admin' && req.query.userId) ? req.query.userId : req.session.userId;
+    const goal = await db.getUserKpiGoalByWeek(req.params.weekKey, targetUserId);
+    res.json(goal);
+  } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
+});
+
 app.put('/api/my-kpi-goal/:weekKey', requireAuth, async (req, res) => {
   try {
     const { closedTarget, rateTarget } = req.body;
+    const targetUserId = (req.session.role === 'admin' && req.query.userId) ? req.query.userId : req.session.userId;
     const normalizedClosed = Math.max(0, parseInt(closedTarget, 10) || 0);
     const normalizedRate = Math.max(0, Math.min(100, parseFloat(rateTarget) || 0));
-    const goal = await db.upsertUserKpiGoal(req.params.weekKey, req.session.userId, normalizedClosed, normalizedRate);
+    const goal = await db.upsertUserKpiGoal(req.params.weekKey, targetUserId, normalizedClosed, normalizedRate);
     res.json(goal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });

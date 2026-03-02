@@ -326,7 +326,11 @@
       user: null,
       kpiWeekKey: getCurrentWeekKey(),
       kpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 },
-      myKpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 }
+      myKpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 },
+      kpiUsers: [],
+      selectedKpiUserId: null,
+      selectedKpiUserName: '',
+      kpiStartDate: new Date().toISOString().slice(0, 10)
     };
 
     // ===== API Helper =====
@@ -375,6 +379,17 @@
       monday.setUTCDate(jan4.getUTCDate() - jan4Day + 1 + (week - 1) * 7);
       return monday;
     }
+    function formatDateYYYYMMDD(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+    function addDays(dateStr, days) {
+      const d = new Date(`${dateStr}T00:00:00`);
+      d.setDate(d.getDate() + days);
+      return formatDateYYYYMMDD(d);
+    }
     function formatWeekLabel(weekKey) {
       const d = getWeekStartDate(weekKey);
       if (!d) return weekKey;
@@ -400,11 +415,15 @@
       const user = await api('GET', '/api/me');
       if (!user) return;
       state.user = user;
+      state.selectedKpiUserId = user.id;
+      state.selectedKpiUserName = user.displayName;
       document.getElementById('userName').textContent = user.displayName;
       const badge = document.getElementById('roleBadge');
       badge.textContent = user.role === 'admin' ? '管理者' : 'クローザー';
       badge.className = 'role-badge ' + (user.role === 'admin' ? 'role-admin' : 'role-closer');
       renderTabs();
+      await loadKpiUsers();
+      await refreshMyKpiGoal();
       await render();
     }
 
@@ -447,7 +466,9 @@
       if (!data) return;
       const { deals, prevDeals, closers, kpiGoal, myKpiGoal } = data;
       state.kpiGoal = kpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0 };
-      state.myKpiGoal = myKpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0 };
+      if (!state.selectedKpiUserId || state.selectedKpiUserId === state.user.id) {
+        state.myKpiGoal = myKpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0 };
+      }
       renderKPIs(deals);
       renderDeals(deals, closers);
       renderClosers(deals, closers);
@@ -529,7 +550,11 @@
 
     function renderPersonalKpi(deals) {
       const panel = document.getElementById('tab-personal-kpi');
-      const myDeals = deals.filter(d => d.closer === state.user.displayName && getWeekKeyByDate(new Date(d.date)) === state.kpiWeekKey);
+      const kpiEndDate = addDays(state.kpiStartDate, 6);
+      const myDeals = deals.filter(d => {
+        if (d.closer !== state.selectedKpiUserName) return false;
+        return d.date >= state.kpiStartDate && d.date <= kpiEndDate;
+      });
       const myClosed = myDeals.filter(d => d.status === 'closed').length;
       const myLost = myDeals.filter(d => d.status === 'lost').length;
       const myRate = (myClosed + myLost) > 0 ? (myClosed / (myClosed + myLost) * 100) : 0;
@@ -538,16 +563,36 @@
       const closedAchieved = goalClosed > 0 && myClosed >= goalClosed;
       const rateAchieved = goalRate > 0 && myRate >= goalRate;
       const allAchieved = (goalClosed > 0 || goalRate > 0) ? (closedAchieved && rateAchieved) : false;
+      const userOptions = state.kpiUsers.map(u => `<option value="${u.id}" ${u.id === state.selectedKpiUserId ? 'selected' : ''}>${esc(u.displayName)}${u.role === 'admin' ? '（管理者）' : ''}</option>`).join('');
       panel.innerHTML = `
         <div class="analysis-card">
-          <h3>個人KPI（${esc(state.user.displayName)}）</h3>
-          <div class="add-row">
-            <input type="week" id="myKpiWeekInput" value="${toWeekInputValue(state.kpiWeekKey)}" onchange="onKpiWeekChange(this.value)">
-            <input type="number" id="myKpiClosedTargetInput" min="0" step="1" value="${goalClosed}" placeholder="成約件数目標">
-            <input type="number" id="myKpiRateTargetInput" min="0" max="100" step="0.1" value="${goalRate.toFixed(1)}" placeholder="成約率目標(%)">
-            <button class="btn btn-primary" onclick="saveMyWeeklyKpiGoal()">保存</button>
+          <h3>個人KPI</h3>
+          <div class="add-row" style="align-items:flex-end;flex-wrap:wrap;">
+            <div style="min-width:200px;flex:1">
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">クローザー選択</label>
+              <select id="myKpiUserSelect" onchange="onKpiUserChange(this.value)" ${isAdmin() ? '' : 'disabled'}>
+                ${userOptions}
+              </select>
+            </div>
+            <div style="min-width:180px;flex:1">
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">開始日（7日間）</label>
+              <input type="date" id="myKpiStartDateInput" value="${state.kpiStartDate}" onchange="onKpiStartDateChange(this.value)">
+            </div>
+            <div style="min-width:180px;flex:1">
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">終了日（自動）</label>
+              <input type="date" value="${kpiEndDate}" disabled>
+            </div>
+            <div style="min-width:180px;flex:1">
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">目標獲得件数</label>
+              <input type="number" id="myKpiClosedTargetInput" min="0" step="1" value="${goalClosed}" placeholder="例: 5">
+            </div>
+            <div style="min-width:180px;flex:1">
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">目標成約率(%)</label>
+              <input type="number" id="myKpiRateTargetInput" min="0" max="100" step="0.1" value="${goalRate.toFixed(1)}" placeholder="例: 40.0">
+            </div>
+            <button class="btn btn-primary" onclick="saveMyWeeklyKpiGoal()">個人KPIを保存</button>
           </div>
-          <p style="color:#64748b;font-size:13px;">対象週: ${formatWeekLabel(state.kpiWeekKey)}</p>
+          <p style="color:#64748b;font-size:13px;">対象: ${esc(state.selectedKpiUserName)} / 期間: ${state.kpiStartDate} 〜 ${kpiEndDate}</p>
         </div>
         <div class="kpi-row">
           <div class="kpi-card kpi-green">
@@ -771,7 +816,40 @@
     async function onKpiWeekChange(weekValue) {
       if (!weekValue) return;
       state.kpiWeekKey = weekValue;
+      const d = getWeekStartDate(weekValue);
+      if (d) state.kpiStartDate = formatDateYYYYMMDD(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())));
+      await refreshMyKpiGoal();
       await render();
+    }
+    async function onKpiStartDateChange(dateValue) {
+      if (!dateValue) return;
+      state.kpiStartDate = dateValue;
+      state.kpiWeekKey = getWeekKeyByDate(new Date(`${dateValue}T00:00:00`));
+      await refreshMyKpiGoal();
+      await render();
+    }
+    async function onKpiUserChange(userId) {
+      state.selectedKpiUserId = userId;
+      const selected = state.kpiUsers.find(u => u.id === userId);
+      state.selectedKpiUserName = selected ? selected.displayName : state.user.displayName;
+      await refreshMyKpiGoal();
+      await render();
+    }
+    async function loadKpiUsers() {
+      const users = await api('GET', '/api/kpi-users');
+      if (!users) return;
+      state.kpiUsers = users;
+      if (!state.selectedKpiUserId || !users.find(u => u.id === state.selectedKpiUserId)) {
+        state.selectedKpiUserId = users[0]?.id || state.user.id;
+      }
+      const selected = users.find(u => u.id === state.selectedKpiUserId);
+      state.selectedKpiUserName = selected ? selected.displayName : state.user.displayName;
+    }
+    async function refreshMyKpiGoal() {
+      const userQuery = state.selectedKpiUserId ? `?userId=${encodeURIComponent(state.selectedKpiUserId)}` : '';
+      const goal = await api('GET', `/api/my-kpi-goal/${encodeURIComponent(state.kpiWeekKey)}${userQuery}`);
+      if (!goal) return;
+      state.myKpiGoal = goal;
     }
     async function saveWeeklyKpiGoal() {
       const weekKey = document.getElementById('kpiWeekInput')?.value || state.kpiWeekKey;
@@ -783,11 +861,12 @@
       alert('週次KPIを保存しました。');
     }
     async function saveMyWeeklyKpiGoal() {
-      const weekKey = document.getElementById('myKpiWeekInput')?.value || state.kpiWeekKey;
+      const weekKey = getWeekKeyByDate(new Date(`${state.kpiStartDate}T00:00:00`));
       const closedTarget = parseInt(document.getElementById('myKpiClosedTargetInput')?.value || '0', 10) || 0;
       const rateTarget = parseFloat(document.getElementById('myKpiRateTargetInput')?.value || '0') || 0;
       state.kpiWeekKey = weekKey;
-      await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(weekKey)}`, { closedTarget, rateTarget });
+      const userQuery = state.selectedKpiUserId ? `?userId=${encodeURIComponent(state.selectedKpiUserId)}` : '';
+      await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(weekKey)}${userQuery}`, { closedTarget, rateTarget });
       await render();
       alert('個人KPIを保存しました。');
     }
