@@ -59,14 +59,15 @@ if (DATABASE_URL) {
   const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
   function mapUser(r) { return { id: r.id, username: r.username, password: r.password, displayName: r.display_name, role: r.role }; }
-  function mapDeal(r) { return { id: r.id, date: r.date, month: r.month, clientName: r.client_name, closer: r.closer, productPrice: r.product_price, status: r.status, lossReason: r.loss_reason, hasFollowUp: r.has_follow_up, paymentMethod: r.payment_method || 'card_once', createdBy: r.created_by }; }
+  function mapDeal(r) { return { id: r.id, date: r.date, month: r.month, clientName: r.client_name, closer: r.closer, closerUserId: r.closer_user_id || null, productPrice: r.product_price, status: r.status, lossReason: r.loss_reason, hasFollowUp: r.has_follow_up, paymentMethod: r.payment_method || 'card_once', createdBy: r.created_by }; }
 
   db = {
     async init() {
       await pool.query(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'closer')`);
       await pool.query(`CREATE TABLE IF NOT EXISTS closers (name TEXT PRIMARY KEY)`);
-      await pool.query(`CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, date TEXT NOT NULL, month TEXT NOT NULL, client_name TEXT NOT NULL, closer TEXT NOT NULL, product_price INTEGER NOT NULL, status TEXT NOT NULL, loss_reason TEXT DEFAULT '', has_follow_up BOOLEAN DEFAULT FALSE, payment_method TEXT DEFAULT 'card_once', created_by TEXT)`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, date TEXT NOT NULL, month TEXT NOT NULL, client_name TEXT NOT NULL, closer TEXT NOT NULL, closer_user_id TEXT, product_price INTEGER NOT NULL, status TEXT NOT NULL, loss_reason TEXT DEFAULT '', has_follow_up BOOLEAN DEFAULT FALSE, payment_method TEXT DEFAULT 'card_once', created_by TEXT)`);
       await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'card_once'`);
+      await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS closer_user_id TEXT`);
       await pool.query(`CREATE TABLE IF NOT EXISTS kpi_goals (week_key TEXT PRIMARY KEY, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0)`);
       await pool.query(`CREATE TABLE IF NOT EXISTS user_kpi_goals (week_key TEXT NOT NULL, user_id TEXT NOT NULL, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0, result_status TEXT NOT NULL DEFAULT 'auto', PRIMARY KEY (week_key, user_id))`);
       await pool.query(`ALTER TABLE user_kpi_goals ADD COLUMN IF NOT EXISTS result_status TEXT NOT NULL DEFAULT 'auto'`);
@@ -88,8 +89,8 @@ if (DATABASE_URL) {
     async closerExists(name) { const { rows } = await pool.query('SELECT 1 FROM closers WHERE name=$1', [name]); return rows.length > 0; },
     async getDealsByMonth(month) { const { rows } = await pool.query('SELECT * FROM deals WHERE month=$1 ORDER BY date DESC', [month]); return rows.map(mapDeal); },
     async getDealById(id) { const { rows } = await pool.query('SELECT * FROM deals WHERE id=$1', [id]); return rows[0] ? mapDeal(rows[0]) : null; },
-    async addDeal(d) { await pool.query('INSERT INTO deals (id,date,month,client_name,closer,product_price,status,loss_reason,has_follow_up,payment_method,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [d.id, d.date, d.month, d.clientName, d.closer, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', d.createdBy]); return d; },
-    async updateDeal(id, d) { await pool.query('UPDATE deals SET date=$1,month=$2,client_name=$3,closer=$4,product_price=$5,status=$6,loss_reason=$7,has_follow_up=$8,payment_method=$9 WHERE id=$10', [d.date, d.month, d.clientName, d.closer, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', id]); },
+    async addDeal(d) { await pool.query('INSERT INTO deals (id,date,month,client_name,closer,closer_user_id,product_price,status,loss_reason,has_follow_up,payment_method,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)', [d.id, d.date, d.month, d.clientName, d.closer, d.closerUserId || null, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', d.createdBy]); return d; },
+    async updateDeal(id, d) { await pool.query('UPDATE deals SET date=$1,month=$2,client_name=$3,closer=$4,closer_user_id=$5,product_price=$6,status=$7,loss_reason=$8,has_follow_up=$9,payment_method=$10 WHERE id=$11', [d.date, d.month, d.clientName, d.closer, d.closerUserId || null, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', id]); },
     async deleteDeal(id) { await pool.query('DELETE FROM deals WHERE id=$1', [id]); },
     async getKpiGoalByWeek(weekKey) {
       const { rows } = await pool.query('SELECT week_key, closed_target, rate_target FROM kpi_goals WHERE week_key=$1', [weekKey]);
@@ -126,7 +127,7 @@ if (DATABASE_URL) {
     const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
     if (!Array.isArray(data.kpiGoals)) data.kpiGoals = [];
     if (!Array.isArray(data.userKpiGoals)) data.userKpiGoals = [];
-    if (Array.isArray(data.deals)) data.deals = data.deals.map(d => ({ ...d, paymentMethod: d.paymentMethod || 'card_once' }));
+    if (Array.isArray(data.deals)) data.deals = data.deals.map(d => ({ ...d, paymentMethod: d.paymentMethod || 'card_once', closerUserId: d.closerUserId || null }));
     return data;
   }
   function writeDB(data) { fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8'); }
@@ -245,9 +246,9 @@ app.get('/api/dashboard', requireAuth, async (req, res) => {
 // ============================================================
 app.post('/api/deals', requireAuth, async (req, res) => {
   try {
-    const { date, month, clientName, closer, productPrice, status, lossReason, hasFollowUp, paymentMethod } = req.body;
+    const { date, month, clientName, closer, closerUserId, productPrice, status, lossReason, hasFollowUp, paymentMethod } = req.body;
     if (!date || !clientName || !closer || !productPrice || !status) return res.status(400).json({ error: '必須項目を入力してください' });
-    const deal = { id: generateId(), date, month, clientName, closer, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', createdBy: req.session.userId };
+    const deal = { id: generateId(), date, month, clientName, closer, closerUserId: closerUserId || null, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', createdBy: req.session.userId };
     await db.addDeal(deal);
     res.json(deal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
@@ -257,8 +258,8 @@ app.put('/api/deals/:id', requireAdmin, async (req, res) => {
   try {
     const existing = await db.getDealById(req.params.id);
     if (!existing) return res.status(404).json({ error: '商談が見つかりません' });
-    const { date, month, clientName, closer, productPrice, status, lossReason, hasFollowUp, paymentMethod } = req.body;
-    await db.updateDeal(req.params.id, { date, month, clientName, closer, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once' });
+    const { date, month, clientName, closer, closerUserId, productPrice, status, lossReason, hasFollowUp, paymentMethod } = req.body;
+    await db.updateDeal(req.params.id, { date, month, clientName, closer, closerUserId: closerUserId || null, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once' });
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
@@ -285,6 +286,16 @@ app.get('/api/kpi-users', requireAuth, async (req, res) => {
     const me = await db.getUserById(req.session.userId);
     if (!me) return res.status(404).json({ error: 'ユーザーが見つかりません' });
     return res.json([{ id: me.id, displayName: me.displayName, username: me.username, role: me.role }]);
+  } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
+});
+
+app.get('/api/closer-users', requireAuth, async (req, res) => {
+  try {
+    const users = await db.getUsers();
+    const closers = users
+      .filter(u => u.role === 'closer' || u.role === 'admin')
+      .map(u => ({ id: u.id, displayName: u.displayName, username: u.username, role: u.role }));
+    res.json(closers);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
 

@@ -329,6 +329,8 @@
       kpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 },
       myKpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0, resultStatus: 'auto' },
       kpiUsers: [],
+      userKpiGoalMap: {},
+      closerUsers: [],
       selectedKpiUserId: null,
       selectedKpiUserName: '',
       kpiStartDate: new Date().toISOString().slice(0, 10)
@@ -424,6 +426,7 @@
       badge.className = 'role-badge ' + (user.role === 'admin' ? 'role-admin' : 'role-closer');
       renderTabs();
       await loadKpiUsers();
+      await loadCloserUsers();
       await refreshMyKpiGoal();
       await render();
     }
@@ -470,6 +473,7 @@
       if (!state.selectedKpiUserId || state.selectedKpiUserId === state.user.id) {
         state.myKpiGoal = myKpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0, resultStatus: 'auto' };
       }
+      await loadUserKpiGoalMap();
       renderKPIs(deals);
       renderPersonalKpiQuick(deals);
       renderDeals(deals, closers);
@@ -508,7 +512,7 @@
     // ===== Deals =====
     function renderDeals(deals, closers) {
       const panel = document.getElementById('tab-deals');
-      if (closers.length === 0) {
+      if (!state.closerUsers || state.closerUsers.length === 0) {
         panel.innerHTML = `<div class="panel-header"><h2>商談一覧</h2></div><div class="empty-state"><div class="empty-icon">📋</div><p>${isAdmin() ? 'クローザーを登録してから商談を追加してください。<br>「設定」タブからクローザーを追加できます。' : 'クローザーが未登録です。管理者に連絡してください。'}</p></div>`;
         return;
       }
@@ -550,69 +554,84 @@
       panel.innerHTML = `<h2 style="margin-bottom:16px">クローザー分析</h2><div class="table-wrap"><table><thead><tr><th>クローザー</th><th>商談数</th><th>成約</th><th>失注</th><th>検討</th><th>成約率</th><th>売上貢献</th><th>報酬（30%+振込加算）</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
 
-    function calculatePersonalKpiMetrics(deals) {
+    function calculatePersonalKpiMetricsForUser(deals, targetUser, goal) {
       const kpiEndDate = addDays(state.kpiStartDate, 6);
-      const myDeals = deals.filter(d => {
-        if (d.closer !== state.selectedKpiUserName) return false;
-        return d.date >= state.kpiStartDate && d.date <= kpiEndDate;
+      const userDeals = deals.filter(d => {
+        if (d.date < state.kpiStartDate || d.date > kpiEndDate) return false;
+        if (d.closerUserId && targetUser.id) return d.closerUserId === targetUser.id;
+        return d.closer === targetUser.displayName;
       });
-      const closed = myDeals.filter(d => d.status === 'closed').length;
-      const lost = myDeals.filter(d => d.status === 'lost').length;
+      const closed = userDeals.filter(d => d.status === 'closed').length;
+      const lost = userDeals.filter(d => d.status === 'lost').length;
       const rate = (closed + lost) > 0 ? (closed / (closed + lost) * 100) : 0;
-      const goalClosed = state.myKpiGoal.closedTarget || 0;
-      const goalRate = state.myKpiGoal.rateTarget || 0;
+      const goalClosed = goal?.closedTarget || 0;
+      const goalRate = goal?.rateTarget || 0;
       const closedAchieved = goalClosed > 0 && closed >= goalClosed;
       const rateAchieved = goalRate > 0 && rate >= goalRate;
       const autoAchieved = (goalClosed > 0 || goalRate > 0) ? (closedAchieved && rateAchieved) : false;
       let statusLabel = autoAchieved ? '達成' : '未達';
-      if (state.myKpiGoal.resultStatus === 'achieved') statusLabel = '達成（手動）';
-      if (state.myKpiGoal.resultStatus === 'not_achieved') statusLabel = '未達（手動）';
+      if ((goal?.resultStatus || 'auto') === 'achieved') statusLabel = '達成（手動）';
+      if ((goal?.resultStatus || 'auto') === 'not_achieved') statusLabel = '未達（手動）';
       return {
-        kpiEndDate, myDeals, closed, lost, rate, goalClosed, goalRate, closedAchieved, rateAchieved, autoAchieved, statusLabel,
+        kpiEndDate,
+        closed,
+        lost,
+        rate,
+        goalClosed,
+        goalRate,
+        statusLabel,
         achievementRate: goalClosed > 0 ? Math.min(999, (closed / goalClosed) * 100) : 0,
         shortfallRate: goalClosed > 0 ? Math.max(0, 100 - (closed / goalClosed) * 100) : 0
       };
     }
 
+    function buildPersonalKpiTableRows(deals, inputPrefix) {
+      return (state.kpiUsers || []).map((u) => {
+        const goal = state.userKpiGoalMap[u.id] || { closedTarget: 0, rateTarget: 0, resultStatus: 'auto' };
+        const m = calculatePersonalKpiMetricsForUser(deals, u, goal);
+        const rowColor = m.statusLabel.includes('達成') ? '#10b981' : '#ef4444';
+        return `<tr>
+          <td style="font-weight:600;">${esc(u.displayName)}</td>
+          <td>${state.kpiStartDate}〜${m.kpiEndDate}</td>
+          <td><input id="${inputPrefix}Closed_${u.id}" type="number" min="0" step="1" value="${m.goalClosed}" style="width:100px"></td>
+          <td>${m.closed}件</td>
+          <td>${m.achievementRate.toFixed(1)}%</td>
+          <td><input id="${inputPrefix}Rate_${u.id}" type="number" min="0" max="100" step="0.1" value="${m.goalRate.toFixed(1)}" style="width:100px"></td>
+          <td>${m.rate.toFixed(1)}%</td>
+          <td>${m.shortfallRate.toFixed(1)}%</td>
+          <td style="font-weight:700;color:${rowColor}">${m.statusLabel}</td>
+          <td>
+            <button class="btn btn-secondary btn-sm" onclick="saveUserKpiGoal('${u.id}','auto','${inputPrefix}')">保存</button>
+            <button class="btn btn-secondary btn-sm" onclick="saveUserKpiGoal('${u.id}','achieved','${inputPrefix}')">達成</button>
+            <button class="btn btn-secondary btn-sm" onclick="saveUserKpiGoal('${u.id}','not_achieved','${inputPrefix}')">未達</button>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
     function renderPersonalKpiQuick(deals) {
       const panel = document.getElementById('personalKpiQuick');
-      const m = calculatePersonalKpiMetrics(deals);
-      const userOptions = state.kpiUsers.map(u => `<option value="${u.id}" ${u.id === state.selectedKpiUserId ? 'selected' : ''}>${esc(u.displayName)}${u.role === 'admin' ? '（管理者）' : ''}</option>`).join('');
+      const kpiEndDate = addDays(state.kpiStartDate, 6);
       panel.innerHTML = `
         <div class="analysis-card">
-          <h3>個人KPI（トップ表示）</h3>
+          <h3>個人KPI（全クローザー見える化）</h3>
           <div class="add-row" style="align-items:flex-end;flex-wrap:wrap;">
-            <div style="min-width:180px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">クローザー</label>
-              <select onchange="onKpiUserChange(this.value)" ${isAdmin() ? '' : 'disabled'}>${userOptions}</select>
-            </div>
-            <div style="min-width:180px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">開始日</label>
+            <div style="min-width:220px;flex:1">
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">開始日（7日間）</label>
               <input type="date" value="${state.kpiStartDate}" onchange="onKpiStartDateChange(this.value)">
             </div>
-            <div style="min-width:180px;flex:1">
+            <div style="min-width:220px;flex:1">
               <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">終了日（自動）</label>
-              <input type="date" value="${m.kpiEndDate}" disabled>
+              <input type="date" value="${kpiEndDate}" disabled>
             </div>
-            <div style="min-width:180px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">目標獲得件数</label>
-              <input type="number" id="quickMyKpiClosedTargetInput" min="0" step="1" value="${m.goalClosed}">
-            </div>
-            <div style="min-width:180px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">目標成約率(%)</label>
-              <input type="number" id="quickMyKpiRateTargetInput" min="0" max="100" step="0.1" value="${m.goalRate.toFixed(1)}">
-            </div>
-            <button class="btn btn-primary" onclick="saveMyWeeklyKpiGoal('auto', true)">保存</button>
           </div>
-          <div class="form-actions" style="justify-content:flex-start;margin-top:8px;">
-            <button class="btn btn-secondary" onclick="saveMyWeeklyKpiGoal('achieved', true)">達成にする</button>
-            <button class="btn btn-secondary" onclick="saveMyWeeklyKpiGoal('not_achieved', true)">未達にする</button>
-            <button class="btn btn-secondary" onclick="saveMyWeeklyKpiGoal('auto', true)">自動判定に戻す</button>
-          </div>
-          <div class="kpi-row" style="margin-top:16px;margin-bottom:0;">
-            <div class="kpi-card kpi-green"><div class="kpi-label">獲得件数</div><div class="kpi-value">${m.closed}件</div><div class="kpi-sub">目標 ${m.goalClosed}件 / 達成率 ${m.achievementRate.toFixed(1)}%</div></div>
-            <div class="kpi-card kpi-blue"><div class="kpi-label">成約率</div><div class="kpi-value">${m.rate.toFixed(1)}%</div><div class="kpi-sub">目標 ${m.goalRate.toFixed(1)}% / 未達率 ${m.shortfallRate.toFixed(1)}%</div></div>
-            <div class="kpi-card"><div class="kpi-label">判定</div><div class="kpi-value" style="font-size:22px;${m.statusLabel.includes('達成') ? 'color:#10b981' : 'color:#ef4444'}">${m.statusLabel}</div><div class="kpi-sub">期間: ${state.kpiStartDate}〜${m.kpiEndDate}</div></div>
+          <div class="table-wrap" style="margin-top:12px;">
+            <table>
+              <thead>
+                <tr><th>クローザー</th><th>期間</th><th>目標獲得件数</th><th>実績件数</th><th>達成率</th><th>目標成約率</th><th>実績成約率</th><th>未達率</th><th>判定</th><th>操作</th></tr>
+              </thead>
+              <tbody>${buildPersonalKpiTableRows(deals, 'quick')}</tbody>
+            </table>
           </div>
         </div>
       `;
@@ -620,58 +639,28 @@
 
     function renderPersonalKpi(deals) {
       const panel = document.getElementById('tab-personal-kpi');
-      const m = calculatePersonalKpiMetrics(deals);
-      const userOptions = state.kpiUsers.map(u => `<option value="${u.id}" ${u.id === state.selectedKpiUserId ? 'selected' : ''}>${esc(u.displayName)}${u.role === 'admin' ? '（管理者）' : ''}</option>`).join('');
+      const kpiEndDate = addDays(state.kpiStartDate, 6);
       panel.innerHTML = `
         <div class="analysis-card">
-          <h3>個人KPI</h3>
+          <h3>個人KPI（一覧）</h3>
+          <p style="color:#64748b;font-size:13px;margin-bottom:10px;">開始日を選ぶと終了日は自動で7日後まで計算されます。切替不要で全クローザーを同時に確認できます。</p>
           <div class="add-row" style="align-items:flex-end;flex-wrap:wrap;">
-            <div style="min-width:200px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">クローザー選択</label>
-              <select id="myKpiUserSelect" onchange="onKpiUserChange(this.value)" ${isAdmin() ? '' : 'disabled'}>
-                ${userOptions}
-              </select>
-            </div>
-            <div style="min-width:180px;flex:1">
+            <div style="min-width:220px;flex:1">
               <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">開始日（7日間）</label>
-              <input type="date" id="myKpiStartDateInput" value="${state.kpiStartDate}" onchange="onKpiStartDateChange(this.value)">
+              <input type="date" value="${state.kpiStartDate}" onchange="onKpiStartDateChange(this.value)">
             </div>
-            <div style="min-width:180px;flex:1">
+            <div style="min-width:220px;flex:1">
               <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">終了日（自動）</label>
-              <input type="date" value="${m.kpiEndDate}" disabled>
+              <input type="date" value="${kpiEndDate}" disabled>
             </div>
-            <div style="min-width:180px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">目標獲得件数</label>
-              <input type="number" id="myKpiClosedTargetInput" min="0" step="1" value="${m.goalClosed}" placeholder="例: 5">
-            </div>
-            <div style="min-width:180px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">目標成約率(%)</label>
-              <input type="number" id="myKpiRateTargetInput" min="0" max="100" step="0.1" value="${m.goalRate.toFixed(1)}" placeholder="例: 40.0">
-            </div>
-            <button class="btn btn-primary" onclick="saveMyWeeklyKpiGoal('auto')">個人KPIを保存</button>
           </div>
-          <div class="form-actions" style="justify-content:flex-start;margin-top:8px;">
-            <button class="btn btn-secondary" onclick="saveMyWeeklyKpiGoal('achieved')">達成にする</button>
-            <button class="btn btn-secondary" onclick="saveMyWeeklyKpiGoal('not_achieved')">未達にする</button>
-            <button class="btn btn-secondary" onclick="saveMyWeeklyKpiGoal('auto')">自動判定に戻す</button>
-          </div>
-          <p style="color:#64748b;font-size:13px;">対象: ${esc(state.selectedKpiUserName)} / 期間: ${state.kpiStartDate} 〜 ${m.kpiEndDate}</p>
-        </div>
-        <div class="kpi-row">
-          <div class="kpi-card kpi-green">
-            <div class="kpi-label">成約件数（個人）</div>
-            <div class="kpi-value">${m.closed}件</div>
-            <div class="kpi-sub">目標 ${m.goalClosed}件 / 達成率 ${m.achievementRate.toFixed(1)}%</div>
-          </div>
-          <div class="kpi-card kpi-blue">
-            <div class="kpi-label">成約率（個人）</div>
-            <div class="kpi-value">${m.rate.toFixed(1)}%</div>
-            <div class="kpi-sub">目標 ${m.goalRate.toFixed(1)}% / 未達率 ${m.shortfallRate.toFixed(1)}%</div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">総合判定</div>
-            <div class="kpi-value" style="font-size:24px;${m.statusLabel.includes('達成') ? 'color:#10b981' : 'color:#ef4444'}">${m.statusLabel}</div>
-            <div class="kpi-sub">母数: 成約 ${m.closed}件 / 失注 ${m.lost}件</div>
+          <div class="table-wrap" style="margin-top:12px;">
+            <table>
+              <thead>
+                <tr><th>クローザー</th><th>期間</th><th>目標獲得件数</th><th>実績件数</th><th>達成率</th><th>目標成約率</th><th>実績成約率</th><th>未達率</th><th>判定</th><th>操作</th></tr>
+              </thead>
+              <tbody>${buildPersonalKpiTableRows(deals, 'tab')}</tbody>
+            </table>
           </div>
         </div>
       `;
@@ -790,7 +779,10 @@
       await populateCloserSelect();
       document.getElementById('fDate').value = deal.date;
       document.getElementById('fClientName').value = deal.clientName;
-      document.getElementById('fCloser').value = deal.closer;
+      const byId = deal.closerUserId && state.closerUsers.find(u => u.id === deal.closerUserId);
+      const byName = state.closerUsers.find(u => u.displayName === deal.closer);
+      const selected = byId || byName;
+      document.getElementById('fCloser').value = selected ? selected.id : '';
       document.getElementById('fPrice').value = deal.productPrice;
       document.getElementById('fPaymentMethod').value = deal.paymentMethod || 'card_once';
       document.getElementById('fStatus').value = deal.status;
@@ -812,9 +804,9 @@
     function hideModal() { document.getElementById('dealModal').classList.remove('show'); state.editingId = null; }
 
     async function populateCloserSelect() {
-      const closers = await api('GET', '/api/closers');
-      if (!closers) return;
-      document.getElementById('fCloser').innerHTML = '<option value="">選択してください</option>' + closers.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+      if (!state.closerUsers || state.closerUsers.length === 0) await loadCloserUsers();
+      const closers = state.closerUsers || [];
+      document.getElementById('fCloser').innerHTML = '<option value="">選択してください</option>' + closers.map(c => `<option value="${esc(c.id)}">${esc(c.displayName)}</option>`).join('');
     }
 
     function onStatusChange() {
@@ -839,7 +831,8 @@
       const body = {
         date, month: date.slice(0,7),
         clientName: document.getElementById('fClientName').value.trim(),
-        closer: document.getElementById('fCloser').value,
+        closerUserId: document.getElementById('fCloser').value,
+        closer: (state.closerUsers.find(u => u.id === document.getElementById('fCloser').value) || {}).displayName || '',
         productPrice: parseInt(document.getElementById('fPrice').value),
         paymentMethod: document.getElementById('fPaymentMethod').value,
         status, lossReason,
@@ -881,14 +874,14 @@
       state.kpiWeekKey = weekValue;
       const d = getWeekStartDate(weekValue);
       if (d) state.kpiStartDate = formatDateYYYYMMDD(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())));
-      await refreshMyKpiGoal();
+      await loadUserKpiGoalMap();
       await render();
     }
     async function onKpiStartDateChange(dateValue) {
       if (!dateValue) return;
       state.kpiStartDate = dateValue;
       state.kpiWeekKey = getWeekKeyByDate(new Date(`${dateValue}T00:00:00`));
-      await refreshMyKpiGoal();
+      await loadUserKpiGoalMap();
       await render();
     }
     async function onKpiUserChange(userId) {
@@ -908,11 +901,33 @@
       const selected = users.find(u => u.id === state.selectedKpiUserId);
       state.selectedKpiUserName = selected ? selected.displayName : state.user.displayName;
     }
+    async function loadCloserUsers() {
+      const users = await api('GET', '/api/closer-users');
+      if (!users) return;
+      state.closerUsers = users;
+    }
+    async function loadUserKpiGoalMap() {
+      const map = {};
+      await Promise.all((state.kpiUsers || []).map(async (u) => {
+        const userQuery = `?userId=${encodeURIComponent(u.id)}`;
+        const goal = await api('GET', `/api/my-kpi-goal/${encodeURIComponent(state.kpiWeekKey)}${userQuery}`);
+        if (goal) map[u.id] = { ...goal, resultStatus: goal.resultStatus || 'auto' };
+      }));
+      state.userKpiGoalMap = map;
+    }
     async function refreshMyKpiGoal() {
       const userQuery = state.selectedKpiUserId ? `?userId=${encodeURIComponent(state.selectedKpiUserId)}` : '';
       const goal = await api('GET', `/api/my-kpi-goal/${encodeURIComponent(state.kpiWeekKey)}${userQuery}`);
       if (!goal) return;
       state.myKpiGoal = { ...goal, resultStatus: goal.resultStatus || 'auto' };
+    }
+    async function saveUserKpiGoal(userId, resultStatus = 'auto', prefix = 'quick') {
+      const weekKey = getWeekKeyByDate(new Date(`${state.kpiStartDate}T00:00:00`));
+      const closedTarget = parseInt(document.getElementById(`${prefix}Closed_${userId}`)?.value || '0', 10) || 0;
+      const rateTarget = parseFloat(document.getElementById(`${prefix}Rate_${userId}`)?.value || '0') || 0;
+      await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(weekKey)}?userId=${encodeURIComponent(userId)}`, { closedTarget, rateTarget, resultStatus });
+      await loadUserKpiGoalMap();
+      await render();
     }
     async function saveWeeklyKpiGoal() {
       const weekKey = document.getElementById('kpiWeekInput')?.value || state.kpiWeekKey;
