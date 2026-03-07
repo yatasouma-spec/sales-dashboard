@@ -214,12 +214,20 @@
           </div>
           <div class="form-group">
             <label>支払い手段</label>
-            <select name="paymentMethod" id="fPaymentMethod" required>
+            <select name="paymentMethod" id="fPaymentMethod" required onchange="onPaymentMethodChange()">
               <option value="card_once">クレカ一括</option>
               <option value="card_installment">クレカ分割</option>
               <option value="card_bank_mix">クレカと銀行振込</option>
               <option value="bank_once">銀行振込一括</option>
             </select>
+          </div>
+          <div class="form-group" id="installmentGroup" style="display:none">
+            <label>分割設定</label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <input type="number" id="fInstallmentMonths" min="1" step="1" placeholder="分割回数（例: 2）" style="flex:1;min-width:140px;">
+              <input type="month" id="fFirstPaymentMonth" style="flex:1;min-width:160px;">
+            </div>
+            <div style="color:#64748b;font-size:12px;margin-top:6px;">分割の場合、各月の売上は「商材単価 ÷ 分割回数」で計算します。</div>
           </div>
           <div class="form-group">
             <label>成約状況</label>
@@ -326,14 +334,17 @@
       editingId: null,
       user: null,
       kpiWeekKey: getCurrentWeekKey(),
+      kpiPeriodKey: '',
       kpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0 },
       myKpiGoal: { weekKey: getCurrentWeekKey(), closedTarget: 0, rateTarget: 0, resultStatus: 'auto' },
+      kgiMonthlyTarget: { monthKey: '', rateTarget: 0 },
       kpiUsers: [],
       userKpiGoalMap: {},
       closerUsers: [],
       selectedKpiUserId: null,
       selectedKpiUserName: '',
-      kpiStartDate: new Date().toISOString().slice(0, 10)
+      kpiStartDate: new Date().toISOString().slice(0, 10),
+      kpiEndDate: addDays(new Date().toISOString().slice(0, 10), 6)
     };
 
     // ===== API Helper =====
@@ -393,6 +404,14 @@
       d.setDate(d.getDate() + days);
       return formatDateYYYYMMDD(d);
     }
+    function getPeriodKey(startDate, endDate) {
+      const s = startDate || state.kpiStartDate;
+      const e = endDate || state.kpiEndDate;
+      return `${s}..${e}`;
+    }
+    function isDateInRange(dateStr, startDate, endDate) {
+      return dateStr >= startDate && dateStr <= endDate;
+    }
     function formatWeekLabel(weekKey) {
       const d = getWeekStartDate(weekKey);
       if (!d) return weekKey;
@@ -400,9 +419,27 @@
       const day = d.getUTCDate();
       return `${weekKey}（${m}/${day}週）`;
     }
+    function getRecognizedRevenueForMonth(deal, monthKey) {
+      const method = deal.paymentMethod || 'card_once';
+      const months = Math.max(1, parseInt(deal.installmentMonths || 1, 10) || 1);
+      const startMonth = deal.firstPaymentMonth || deal.month;
+      if (method === 'card_installment' || method === 'card_bank_mix') {
+        for (let i = 0; i < months; i++) {
+          const m = addMonths(startMonth, i);
+          if (m === monthKey) return Math.round(deal.productPrice / months);
+        }
+        return 0;
+      }
+      return deal.month === monthKey ? deal.productPrice : 0;
+    }
+    function addMonths(ym, add) {
+      const [y, m] = ym.split('-').map(Number);
+      const d = new Date(y, m - 1 + add, 1);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    }
     function getDealCommission(deal) {
       if (deal.status !== 'closed') return 0;
-      return deal.productPrice * COMMISSION_RATE;
+      return getRecognizedRevenueForMonth(deal, state.currentMonth) * COMMISSION_RATE;
     }
     function getDealCloserCompensation(deal) {
       if (deal.status !== 'closed') return 0;
@@ -466,10 +503,12 @@
     // ===== Main Render =====
     async function render() {
       document.getElementById('monthLabel').textContent = formatMonth(state.currentMonth);
-      const data = await api('GET', `/api/dashboard?month=${state.currentMonth}&weekKey=${encodeURIComponent(state.kpiWeekKey)}`);
+      state.kpiPeriodKey = getPeriodKey();
+      const data = await api('GET', `/api/dashboard?month=${state.currentMonth}&periodKey=${encodeURIComponent(state.kpiPeriodKey)}`);
       if (!data) return;
-      const { deals, prevDeals, closers, kpiGoal, myKpiGoal } = data;
+      const { deals, prevDeals, closers, kpiGoal, myKpiGoal, kgiMonthly } = data;
       state.kpiGoal = kpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0 };
+      state.kgiMonthlyTarget = kgiMonthly || { monthKey: state.currentMonth, rateTarget: 0 };
       if (!state.selectedKpiUserId || state.selectedKpiUserId === state.user.id) {
         state.myKpiGoal = myKpiGoal || { weekKey: state.kpiWeekKey, closedTarget: 0, rateTarget: 0, resultStatus: 'auto' };
       }
@@ -492,19 +531,26 @@
       const totalSales = closed.reduce((s,d) => s + getDealCommission(d), 0);
       const decided = closed.length + lost.length;
       const rate = decided > 0 ? (closed.length / decided * 100) : 0;
-      const weekDeals = deals.filter(d => getWeekKeyByDate(new Date(d.date)) === state.kpiWeekKey);
-      const weekClosed = weekDeals.filter(d => d.status === 'closed').length;
-      const weekLost = weekDeals.filter(d => d.status === 'lost').length;
-      const weekRate = (weekClosed + weekLost) > 0 ? (weekClosed / (weekClosed + weekLost) * 100) : 0;
+      const periodDeals = deals.filter(d => isDateInRange(d.date, state.kpiStartDate, state.kpiEndDate));
+      const periodClosed = periodDeals.filter(d => d.status === 'closed').length;
+      const periodLost = periodDeals.filter(d => d.status === 'lost').length;
+      const periodRate = (periodClosed + periodLost) > 0 ? (periodClosed / (periodClosed + periodLost) * 100) : 0;
+      const monthDeals = deals.filter(d => d.date.startsWith(state.currentMonth));
+      const monthClosed = monthDeals.filter(d => d.status === 'closed').length;
+      const monthLost = monthDeals.filter(d => d.status === 'lost').length;
+      const monthRate = (monthClosed + monthLost) > 0 ? (monthClosed / (monthClosed + monthLost) * 100) : 0;
       const closedTarget = state.kpiGoal.closedTarget || 0;
       const rateTarget = state.kpiGoal.rateTarget || 0;
-      const closedProgress = closedTarget > 0 ? (weekClosed / closedTarget * 100) : 0;
-      const rateGap = weekRate - rateTarget;
+      const closedProgress = closedTarget > 0 ? (periodClosed / closedTarget * 100) : 0;
+      const rateGap = periodRate - rateTarget;
+      const kgiTarget = state.kgiMonthlyTarget.rateTarget || 0;
+      const kgiGap = monthRate - kgiTarget;
       document.getElementById('kpiRow').innerHTML = `
         <div class="kpi-card"><div class="kpi-label">会社売上</div><div class="kpi-value">${formatCurrency(totalSales)}</div><div class="kpi-sub">成約単価合計（商材×17.5%）</div></div>
-        <div class="kpi-card kpi-green"><div class="kpi-label">成約</div><div class="kpi-value">${closed.length}件</div><div class="kpi-sub">週次目標 ${closedTarget}件 / 実績 ${weekClosed}件（${closedTarget > 0 ? closedProgress.toFixed(0) : 0}%）</div></div>
+        <div class="kpi-card kpi-green"><div class="kpi-label">成約</div><div class="kpi-value">${closed.length}件</div><div class="kpi-sub">期間目標 ${closedTarget}件 / 実績 ${periodClosed}件（${closedTarget > 0 ? closedProgress.toFixed(0) : 0}%）</div></div>
         <div class="kpi-card kpi-red"><div class="kpi-label">失注</div><div class="kpi-value">${lost.length}件</div></div>
-        <div class="kpi-card kpi-blue"><div class="kpi-label">成約率</div><div class="kpi-value">${rate.toFixed(1)}%</div><div class="kpi-sub">週次目標 ${rateTarget.toFixed(1)}% / 実績 ${weekRate.toFixed(1)}%（${rateGap >= 0 ? '+' : ''}${rateGap.toFixed(1)}pt）</div></div>
+        <div class="kpi-card kpi-blue"><div class="kpi-label">成約率</div><div class="kpi-value">${rate.toFixed(1)}%</div><div class="kpi-sub">期間目標 ${rateTarget.toFixed(1)}% / 実績 ${periodRate.toFixed(1)}%（${rateGap >= 0 ? '+' : ''}${rateGap.toFixed(1)}pt）</div></div>
+        <div class="kpi-card"><div class="kpi-label">KGI 月次成約率</div><div class="kpi-value">${monthRate.toFixed(1)}%</div><div class="kpi-sub">目標 ${kgiTarget.toFixed(1)}%（${kgiGap >= 0 ? '+' : ''}${kgiGap.toFixed(1)}pt）</div></div>
         <div class="kpi-card"><div class="kpi-label">商談数</div><div class="kpi-value">${deals.length}件</div><div class="kpi-sub">検討中 ${considering.length} / 再面談 ${followUps.length}</div></div>
       `;
     }
@@ -524,13 +570,13 @@
         const closerComp = d.status === 'closed' ? formatCurrency(getDealCloserCompensation(d)) : '-';
         const payment = PAYMENT_METHOD_LABELS[d.paymentMethod || 'card_once'] || '未設定';
         const actions = isAdmin() ? `<td><button class="btn btn-secondary btn-sm" onclick="editDeal('${d.id}')">編集</button> <button class="btn btn-danger btn-sm" onclick="deleteDeal('${d.id}')">削除</button></td>` : '<td></td>';
-        return `<tr><td>${d.date}</td><td>${esc(d.clientName)}</td><td>${esc(d.closer)}</td><td>${(d.productPrice/10000).toFixed(0)}万円</td><td>${esc(payment)}</td><td><span class="badge ${sc}">${sl}</span></td><td>${d.status==='lost'?esc(d.lossReason):'-'}</td><td>${d.hasFollowUp?'<span class="badge badge-followup">再面談</span>':'-'}</td><td>${comm}</td><td>${closerComp}</td>${actions}</tr>`;
+        return `<tr><td>${d.date}</td><td>${esc(d.clientName)}</td><td>${esc(d.closer)}</td><td>${(d.productPrice/10000).toFixed(0)}万円</td><td>${esc(payment)}</td><td>${d.installmentMonths || 1}</td><td>${d.firstPaymentMonth || d.month}</td><td><span class="badge ${sc}">${sl}</span></td><td>${d.status==='lost'?esc(d.lossReason):'-'}</td><td>${d.hasFollowUp?'<span class="badge badge-followup">再面談</span>':'-'}</td><td>${comm}</td><td>${closerComp}</td>${actions}</tr>`;
       }).join('');
       const actionTh = isAdmin() ? '<th>操作</th>' : '<th></th>';
       panel.innerHTML = `
         <div class="panel-header"><h2>商談一覧</h2><button class="btn btn-primary" onclick="showAddModal()">+ 商談追加</button></div>
         ${deals.length === 0 ? '<div class="empty-state"><div class="empty-icon">📋</div><p>商談データがありません。「+ 商談追加」から追加してください。</p></div>' :
-        `<div class="table-wrap"><table><thead><tr><th>日付</th><th>商談相手</th><th>クローザー</th><th>商材単価</th><th>支払い手段</th><th>状況</th><th>失注理由</th><th>再面談</th><th>成約単価</th><th>クローザー報酬</th>${actionTh}</tr></thead><tbody>${rows}</tbody></table></div>`}
+        `<div class="table-wrap"><table><thead><tr><th>日付</th><th>商談相手</th><th>クローザー</th><th>商材単価</th><th>支払い手段</th><th>分割回数</th><th>初回請求月</th><th>状況</th><th>失注理由</th><th>再面談</th><th>今月売上(17.5%)</th><th>クローザー報酬</th>${actionTh}</tr></thead><tbody>${rows}</tbody></table></div>`}
       `;
     }
 
@@ -555,9 +601,14 @@
     }
 
     function calculatePersonalKpiMetricsForUser(deals, targetUser, goal) {
-      const kpiEndDate = addDays(state.kpiStartDate, 6);
+      const kpiEndDate = state.kpiEndDate;
       const userDeals = deals.filter(d => {
         if (d.date < state.kpiStartDate || d.date > kpiEndDate) return false;
+        if (d.closerUserId && targetUser.id) return d.closerUserId === targetUser.id;
+        return d.closer === targetUser.displayName;
+      });
+      const monthDeals = deals.filter(d => {
+        if (!d.date.startsWith(state.currentMonth)) return false;
         if (d.closerUserId && targetUser.id) return d.closerUserId === targetUser.id;
         return d.closer === targetUser.displayName;
       });
@@ -572,6 +623,11 @@
       let statusLabel = autoAchieved ? '達成' : '未達';
       if ((goal?.resultStatus || 'auto') === 'achieved') statusLabel = '達成（手動）';
       if ((goal?.resultStatus || 'auto') === 'not_achieved') statusLabel = '未達（手動）';
+      const monthClosed = monthDeals.filter(d => d.status === 'closed').length;
+      const monthLost = monthDeals.filter(d => d.status === 'lost').length;
+      const monthRate = (monthClosed + monthLost) > 0 ? (monthClosed / (monthClosed + monthLost) * 100) : 0;
+      const kgiTarget = state.kgiMonthlyTarget.rateTarget || 0;
+      const kgiAchieved = kgiTarget > 0 ? monthRate >= kgiTarget : false;
       return {
         kpiEndDate,
         closed,
@@ -580,6 +636,8 @@
         goalClosed,
         goalRate,
         statusLabel,
+        monthRate,
+        kgiAchieved,
         achievementRate: goalClosed > 0 ? Math.min(999, (closed / goalClosed) * 100) : 0,
         shortfallRate: goalClosed > 0 ? Math.max(0, 100 - (closed / goalClosed) * 100) : 0
       };
@@ -599,7 +657,9 @@
           <td><input id="${inputPrefix}Rate_${u.id}" type="number" min="0" max="100" step="0.1" value="${m.goalRate.toFixed(1)}" style="width:100px"></td>
           <td>${m.rate.toFixed(1)}%</td>
           <td>${m.shortfallRate.toFixed(1)}%</td>
+          <td>${m.monthRate.toFixed(1)}%</td>
           <td style="font-weight:700;color:${rowColor}">${m.statusLabel}</td>
+          <td style="font-weight:700;color:${m.kgiAchieved ? '#10b981' : '#ef4444'}">${m.kgiAchieved ? '達成' : '未達'}</td>
           <td>
             <button class="btn btn-secondary btn-sm" onclick="saveUserKpiGoal('${u.id}','auto','${inputPrefix}')">保存</button>
             <button class="btn btn-secondary btn-sm" onclick="saveUserKpiGoal('${u.id}','achieved','${inputPrefix}')">達成</button>
@@ -611,24 +671,24 @@
 
     function renderPersonalKpiQuick(deals) {
       const panel = document.getElementById('personalKpiQuick');
-      const kpiEndDate = addDays(state.kpiStartDate, 6);
+      const kpiEndDate = state.kpiEndDate;
       panel.innerHTML = `
         <div class="analysis-card">
           <h3>個人KPI（全クローザー見える化）</h3>
           <div class="add-row" style="align-items:flex-end;flex-wrap:wrap;">
             <div style="min-width:220px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">開始日（7日間）</label>
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">開始日</label>
               <input type="date" value="${state.kpiStartDate}" onchange="onKpiStartDateChange(this.value)">
             </div>
             <div style="min-width:220px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">終了日（自動）</label>
-              <input type="date" value="${kpiEndDate}" disabled>
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">終了日</label>
+              <input type="date" value="${kpiEndDate}" onchange="onKpiEndDateChange(this.value)">
             </div>
           </div>
           <div class="table-wrap" style="margin-top:12px;">
             <table>
               <thead>
-                <tr><th>クローザー</th><th>期間</th><th>目標獲得件数</th><th>実績件数</th><th>達成率</th><th>目標成約率</th><th>実績成約率</th><th>未達率</th><th>判定</th><th>操作</th></tr>
+                <tr><th>クローザー</th><th>期間</th><th>目標獲得件数</th><th>実績件数</th><th>達成率</th><th>目標成約率</th><th>実績成約率</th><th>未達率</th><th>月次成約率</th><th>KPI判定</th><th>KGI判定</th><th>操作</th></tr>
               </thead>
               <tbody>${buildPersonalKpiTableRows(deals, 'quick')}</tbody>
             </table>
@@ -639,25 +699,25 @@
 
     function renderPersonalKpi(deals) {
       const panel = document.getElementById('tab-personal-kpi');
-      const kpiEndDate = addDays(state.kpiStartDate, 6);
+      const kpiEndDate = state.kpiEndDate;
       panel.innerHTML = `
         <div class="analysis-card">
           <h3>個人KPI（一覧）</h3>
-          <p style="color:#64748b;font-size:13px;margin-bottom:10px;">開始日を選ぶと終了日は自動で7日後まで計算されます。切替不要で全クローザーを同時に確認できます。</p>
+          <p style="color:#64748b;font-size:13px;margin-bottom:10px;">開始日と終了日を自由に設定できます。切替不要で全クローザーを同時に確認できます。</p>
           <div class="add-row" style="align-items:flex-end;flex-wrap:wrap;">
             <div style="min-width:220px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">開始日（7日間）</label>
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">開始日</label>
               <input type="date" value="${state.kpiStartDate}" onchange="onKpiStartDateChange(this.value)">
             </div>
             <div style="min-width:220px;flex:1">
-              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">終了日（自動）</label>
-              <input type="date" value="${kpiEndDate}" disabled>
+              <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;">終了日</label>
+              <input type="date" value="${kpiEndDate}" onchange="onKpiEndDateChange(this.value)">
             </div>
           </div>
           <div class="table-wrap" style="margin-top:12px;">
             <table>
               <thead>
-                <tr><th>クローザー</th><th>期間</th><th>目標獲得件数</th><th>実績件数</th><th>達成率</th><th>目標成約率</th><th>実績成約率</th><th>未達率</th><th>判定</th><th>操作</th></tr>
+                <tr><th>クローザー</th><th>期間</th><th>目標獲得件数</th><th>実績件数</th><th>達成率</th><th>目標成約率</th><th>実績成約率</th><th>未達率</th><th>月次成約率</th><th>KPI判定</th><th>KGI判定</th><th>操作</th></tr>
               </thead>
               <tbody>${buildPersonalKpiTableRows(deals, 'tab')}</tbody>
             </table>
@@ -732,14 +792,24 @@
           <p style="color:#64748b;font-size:13px;margin-top:8px;">過去の月次データは削除しない限り保持され、月切り替えでいつでも参照できます。</p>
         </div>
         <div class="settings-section">
-          <h3>週次KPI設定</h3>
+          <h3>期間KPI設定</h3>
           <div class="add-row">
-            <input type="week" id="kpiWeekInput" value="${toWeekInputValue(state.kpiWeekKey)}" onchange="onKpiWeekChange(this.value)">
+            <input type="date" id="kpiStartInput" value="${state.kpiStartDate}" onchange="onKpiStartDateChange(this.value)">
+            <input type="date" id="kpiEndInput" value="${state.kpiEndDate}" onchange="onKpiEndDateChange(this.value)">
             <input type="number" id="kpiClosedTargetInput" min="0" step="1" value="${state.kpiGoal.closedTarget || 0}" placeholder="成約件数目標">
             <input type="number" id="kpiRateTargetInput" min="0" max="100" step="0.1" value="${(state.kpiGoal.rateTarget || 0).toFixed(1)}" placeholder="成約率目標(%)">
             <button class="btn btn-primary" onclick="saveWeeklyKpiGoal()">保存</button>
           </div>
-          <p style="color:#64748b;font-size:13px;">対象週: ${formatWeekLabel(state.kpiWeekKey)}（成約件数/成約率の目標を毎週更新）</p>
+          <p style="color:#64748b;font-size:13px;">対象期間: ${state.kpiStartDate}〜${state.kpiEndDate}（成約件数/成約率の目標を期間ごとに更新）</p>
+        </div>
+        <div class="settings-section">
+          <h3>KGI（月次成約率）</h3>
+          <div class="add-row">
+            <input type="month" id="kgiMonthInput" value="${state.currentMonth}">
+            <input type="number" id="kgiRateTargetInput" min="0" max="100" step="0.1" value="${(state.kgiMonthlyTarget.rateTarget || 0).toFixed(1)}" placeholder="月次成約率目標(%)">
+            <button class="btn btn-primary" onclick="saveKgiMonthly()">保存</button>
+          </div>
+          <p style="color:#64748b;font-size:13px;">KGIは月次の成約率目標です。</p>
         </div>
         <div class="settings-section">
           <h3>報酬設定（参考）</h3>
@@ -763,8 +833,11 @@
       document.getElementById('fDate').value = new Date().toISOString().slice(0,10);
       document.getElementById('fStatus').value = 'considering';
       document.getElementById('fPaymentMethod').value = 'card_once';
+      document.getElementById('fInstallmentMonths').value = '2';
+      document.getElementById('fFirstPaymentMonth').value = state.currentMonth;
       document.getElementById('fEditId').value = '';
       onStatusChange();
+      onPaymentMethodChange();
       await populateCloserSelect();
       document.getElementById('dealModal').classList.add('show');
     }
@@ -785,10 +858,13 @@
       document.getElementById('fCloser').value = selected ? selected.id : '';
       document.getElementById('fPrice').value = deal.productPrice;
       document.getElementById('fPaymentMethod').value = deal.paymentMethod || 'card_once';
+      document.getElementById('fInstallmentMonths').value = deal.installmentMonths || 1;
+      document.getElementById('fFirstPaymentMonth').value = deal.firstPaymentMonth || deal.month;
       document.getElementById('fStatus').value = deal.status;
       document.getElementById('fFollowUp').checked = deal.hasFollowUp;
       document.getElementById('fEditId').value = deal.id;
       onStatusChange();
+      onPaymentMethodChange();
       if (deal.status === 'lost') {
         if (LOSS_REASONS_LIST.includes(deal.lossReason)) {
           document.getElementById('fLossReason').value = deal.lossReason;
@@ -818,6 +894,11 @@
     function onLossReasonChange() {
       document.getElementById('customReasonGroup').style.display = document.getElementById('fLossReason').value === 'その他' ? 'block' : 'none';
     }
+    function onPaymentMethodChange() {
+      const method = document.getElementById('fPaymentMethod').value;
+      const show = method === 'card_installment' || method === 'card_bank_mix';
+      document.getElementById('installmentGroup').style.display = show ? 'block' : 'none';
+    }
 
     async function saveDeal(e) {
       e.preventDefault();
@@ -835,6 +916,8 @@
         closer: (state.closerUsers.find(u => u.id === document.getElementById('fCloser').value) || {}).displayName || '',
         productPrice: parseInt(document.getElementById('fPrice').value),
         paymentMethod: document.getElementById('fPaymentMethod').value,
+        installmentMonths: parseInt(document.getElementById('fInstallmentMonths').value || '1', 10) || 1,
+        firstPaymentMonth: document.getElementById('fFirstPaymentMonth').value || date.slice(0,7),
         status, lossReason,
         hasFollowUp: document.getElementById('fFollowUp').checked
       };
@@ -880,7 +963,20 @@
     async function onKpiStartDateChange(dateValue) {
       if (!dateValue) return;
       state.kpiStartDate = dateValue;
-      state.kpiWeekKey = getWeekKeyByDate(new Date(`${dateValue}T00:00:00`));
+      if (!state.kpiEndDate || state.kpiEndDate < state.kpiStartDate) {
+        state.kpiEndDate = addDays(dateValue, 6);
+      }
+      state.kpiPeriodKey = getPeriodKey();
+      await loadUserKpiGoalMap();
+      await render();
+    }
+    async function onKpiEndDateChange(dateValue) {
+      if (!dateValue) return;
+      state.kpiEndDate = dateValue;
+      if (state.kpiEndDate < state.kpiStartDate) {
+        state.kpiStartDate = dateValue;
+      }
+      state.kpiPeriodKey = getPeriodKey();
       await loadUserKpiGoalMap();
       await render();
     }
@@ -908,9 +1004,10 @@
     }
     async function loadUserKpiGoalMap() {
       const map = {};
+      const periodKey = getPeriodKey();
       await Promise.all((state.kpiUsers || []).map(async (u) => {
         const userQuery = `?userId=${encodeURIComponent(u.id)}`;
-        const goal = await api('GET', `/api/my-kpi-goal/${encodeURIComponent(state.kpiWeekKey)}${userQuery}`);
+        const goal = await api('GET', `/api/my-kpi-goal/${encodeURIComponent(periodKey)}${userQuery}`);
         if (goal) map[u.id] = { ...goal, resultStatus: goal.resultStatus || 'auto' };
       }));
       state.userKpiGoalMap = map;
@@ -922,33 +1019,41 @@
       state.myKpiGoal = { ...goal, resultStatus: goal.resultStatus || 'auto' };
     }
     async function saveUserKpiGoal(userId, resultStatus = 'auto', prefix = 'quick') {
-      const weekKey = getWeekKeyByDate(new Date(`${state.kpiStartDate}T00:00:00`));
+      const periodKey = getPeriodKey();
       const closedTarget = parseInt(document.getElementById(`${prefix}Closed_${userId}`)?.value || '0', 10) || 0;
       const rateTarget = parseFloat(document.getElementById(`${prefix}Rate_${userId}`)?.value || '0') || 0;
-      await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(weekKey)}?userId=${encodeURIComponent(userId)}`, { closedTarget, rateTarget, resultStatus });
+      await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(periodKey)}?userId=${encodeURIComponent(userId)}`, { closedTarget, rateTarget, resultStatus });
       await loadUserKpiGoalMap();
       await render();
     }
     async function saveWeeklyKpiGoal() {
-      const weekKey = document.getElementById('kpiWeekInput')?.value || state.kpiWeekKey;
+      const weekKey = getPeriodKey();
       const closedTarget = parseInt(document.getElementById('kpiClosedTargetInput')?.value || '0', 10) || 0;
       const rateTarget = parseFloat(document.getElementById('kpiRateTargetInput')?.value || '0') || 0;
-      state.kpiWeekKey = weekKey;
+      state.kpiPeriodKey = weekKey;
       await api('PUT', `/api/kpi-goals/${encodeURIComponent(weekKey)}`, { closedTarget, rateTarget });
       await render();
       alert('週次KPIを保存しました。');
     }
     async function saveMyWeeklyKpiGoal(resultStatus = 'auto', useQuickInputs = false) {
-      const weekKey = getWeekKeyByDate(new Date(`${state.kpiStartDate}T00:00:00`));
+      const weekKey = getPeriodKey();
       const closedInputId = useQuickInputs ? 'quickMyKpiClosedTargetInput' : 'myKpiClosedTargetInput';
       const rateInputId = useQuickInputs ? 'quickMyKpiRateTargetInput' : 'myKpiRateTargetInput';
       const closedTarget = parseInt(document.getElementById(closedInputId)?.value || state.myKpiGoal.closedTarget || '0', 10) || 0;
       const rateTarget = parseFloat(document.getElementById(rateInputId)?.value || state.myKpiGoal.rateTarget || '0') || 0;
-      state.kpiWeekKey = weekKey;
+      state.kpiPeriodKey = weekKey;
       const userQuery = state.selectedKpiUserId ? `?userId=${encodeURIComponent(state.selectedKpiUserId)}` : '';
       await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(weekKey)}${userQuery}`, { closedTarget, rateTarget, resultStatus });
       await render();
       alert(resultStatus === 'auto' ? '個人KPIを保存しました。' : `個人KPIを「${resultStatus === 'achieved' ? '達成' : '未達'}」に更新しました。`);
+    }
+
+    async function saveKgiMonthly() {
+      const monthKey = document.getElementById('kgiMonthInput')?.value || state.currentMonth;
+      const rateTarget = parseFloat(document.getElementById('kgiRateTargetInput')?.value || '0') || 0;
+      await api('PUT', `/api/kgi-monthly/${encodeURIComponent(monthKey)}`, { rateTarget });
+      await render();
+      alert('KGI（月次成約率）を保存しました。');
     }
 
     // ===== User Management =====

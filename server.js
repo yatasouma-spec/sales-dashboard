@@ -47,6 +47,26 @@ function getISOWeekKey(date = new Date()) {
   const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
   return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
 }
+function addMonths(ym, add) {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y, m - 1 + add, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function isMonthInRange(month, startMonth, months) {
+  for (let i = 0; i < months; i++) {
+    if (addMonths(startMonth, i) === month) return true;
+  }
+  return false;
+}
+function getRecognizedRevenueForMonth(deal, monthKey) {
+  const method = deal.paymentMethod || 'card_once';
+  const months = Math.max(1, parseInt(deal.installmentMonths || 1, 10) || 1);
+  const startMonth = deal.firstPaymentMonth || deal.month;
+  if (method === 'card_installment' || method === 'card_bank_mix') {
+    return isMonthInRange(monthKey, startMonth, months) ? Math.round(deal.productPrice / months) : 0;
+  }
+  return deal.month === monthKey ? deal.productPrice : 0;
+}
 
 // ============================================================
 // Database Abstraction - JSON File or PostgreSQL
@@ -59,18 +79,21 @@ if (DATABASE_URL) {
   const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
   function mapUser(r) { return { id: r.id, username: r.username, password: r.password, displayName: r.display_name, role: r.role }; }
-  function mapDeal(r) { return { id: r.id, date: r.date, month: r.month, clientName: r.client_name, closer: r.closer, closerUserId: r.closer_user_id || null, productPrice: r.product_price, status: r.status, lossReason: r.loss_reason, hasFollowUp: r.has_follow_up, paymentMethod: r.payment_method || 'card_once', createdBy: r.created_by }; }
+  function mapDeal(r) { return { id: r.id, date: r.date, month: r.month, clientName: r.client_name, closer: r.closer, closerUserId: r.closer_user_id || null, productPrice: r.product_price, status: r.status, lossReason: r.loss_reason, hasFollowUp: r.has_follow_up, paymentMethod: r.payment_method || 'card_once', installmentMonths: r.installment_months || 1, firstPaymentMonth: r.first_payment_month || r.month, createdBy: r.created_by }; }
 
   db = {
     async init() {
       await pool.query(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'closer')`);
       await pool.query(`CREATE TABLE IF NOT EXISTS closers (name TEXT PRIMARY KEY)`);
-      await pool.query(`CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, date TEXT NOT NULL, month TEXT NOT NULL, client_name TEXT NOT NULL, closer TEXT NOT NULL, closer_user_id TEXT, product_price INTEGER NOT NULL, status TEXT NOT NULL, loss_reason TEXT DEFAULT '', has_follow_up BOOLEAN DEFAULT FALSE, payment_method TEXT DEFAULT 'card_once', created_by TEXT)`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, date TEXT NOT NULL, month TEXT NOT NULL, client_name TEXT NOT NULL, closer TEXT NOT NULL, closer_user_id TEXT, product_price INTEGER NOT NULL, status TEXT NOT NULL, loss_reason TEXT DEFAULT '', has_follow_up BOOLEAN DEFAULT FALSE, payment_method TEXT DEFAULT 'card_once', installment_months INTEGER DEFAULT 1, first_payment_month TEXT, created_by TEXT)`);
       await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'card_once'`);
       await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS closer_user_id TEXT`);
+      await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS installment_months INTEGER DEFAULT 1`);
+      await pool.query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS first_payment_month TEXT`);
       await pool.query(`CREATE TABLE IF NOT EXISTS kpi_goals (week_key TEXT PRIMARY KEY, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0)`);
       await pool.query(`CREATE TABLE IF NOT EXISTS user_kpi_goals (week_key TEXT NOT NULL, user_id TEXT NOT NULL, closed_target INTEGER NOT NULL DEFAULT 0, rate_target NUMERIC NOT NULL DEFAULT 0, result_status TEXT NOT NULL DEFAULT 'auto', PRIMARY KEY (week_key, user_id))`);
       await pool.query(`ALTER TABLE user_kpi_goals ADD COLUMN IF NOT EXISTS result_status TEXT NOT NULL DEFAULT 'auto'`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS kgi_monthly (month_key TEXT PRIMARY KEY, rate_target NUMERIC NOT NULL DEFAULT 0)`);
       const { rows } = await pool.query('SELECT COUNT(*) FROM users');
       if (parseInt(rows[0].count) === 0) {
         const hash = bcrypt.hashSync('admin123', 10);
@@ -87,10 +110,13 @@ if (DATABASE_URL) {
     async addCloser(name) { await pool.query('INSERT INTO closers (name) VALUES ($1) ON CONFLICT DO NOTHING', [name]); return db.getClosers(); },
     async deleteCloser(name) { await pool.query('DELETE FROM closers WHERE name=$1', [name]); return db.getClosers(); },
     async closerExists(name) { const { rows } = await pool.query('SELECT 1 FROM closers WHERE name=$1', [name]); return rows.length > 0; },
-    async getDealsByMonth(month) { const { rows } = await pool.query('SELECT * FROM deals WHERE month=$1 ORDER BY date DESC', [month]); return rows.map(mapDeal); },
+    async getDealsByMonth(month) {
+      const { rows } = await pool.query('SELECT * FROM deals ORDER BY date DESC');
+      return rows.map(mapDeal).filter(d => getRecognizedRevenueForMonth(d, month) > 0 || d.month === month);
+    },
     async getDealById(id) { const { rows } = await pool.query('SELECT * FROM deals WHERE id=$1', [id]); return rows[0] ? mapDeal(rows[0]) : null; },
-    async addDeal(d) { await pool.query('INSERT INTO deals (id,date,month,client_name,closer,closer_user_id,product_price,status,loss_reason,has_follow_up,payment_method,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)', [d.id, d.date, d.month, d.clientName, d.closer, d.closerUserId || null, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', d.createdBy]); return d; },
-    async updateDeal(id, d) { await pool.query('UPDATE deals SET date=$1,month=$2,client_name=$3,closer=$4,closer_user_id=$5,product_price=$6,status=$7,loss_reason=$8,has_follow_up=$9,payment_method=$10 WHERE id=$11', [d.date, d.month, d.clientName, d.closer, d.closerUserId || null, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', id]); },
+    async addDeal(d) { await pool.query('INSERT INTO deals (id,date,month,client_name,closer,closer_user_id,product_price,status,loss_reason,has_follow_up,payment_method,installment_months,first_payment_month,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)', [d.id, d.date, d.month, d.clientName, d.closer, d.closerUserId || null, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', d.installmentMonths || 1, d.firstPaymentMonth || d.month, d.createdBy]); return d; },
+    async updateDeal(id, d) { await pool.query('UPDATE deals SET date=$1,month=$2,client_name=$3,closer=$4,closer_user_id=$5,product_price=$6,status=$7,loss_reason=$8,has_follow_up=$9,payment_method=$10,installment_months=$11,first_payment_month=$12 WHERE id=$13', [d.date, d.month, d.clientName, d.closer, d.closerUserId || null, d.productPrice, d.status, d.lossReason, d.hasFollowUp, d.paymentMethod || 'card_once', d.installmentMonths || 1, d.firstPaymentMonth || d.month, id]); },
     async deleteDeal(id) { await pool.query('DELETE FROM deals WHERE id=$1', [id]); },
     async getKpiGoalByWeek(weekKey) {
       const { rows } = await pool.query('SELECT week_key, closed_target, rate_target FROM kpi_goals WHERE week_key=$1', [weekKey]);
@@ -115,6 +141,18 @@ if (DATABASE_URL) {
         [weekKey, userId, closedTarget, rateTarget, resultStatus]
       );
       return { weekKey, userId, closedTarget, rateTarget, resultStatus };
+    },
+    async getKgiMonthly(monthKey) {
+      const { rows } = await pool.query('SELECT month_key, rate_target FROM kgi_monthly WHERE month_key=$1', [monthKey]);
+      if (!rows[0]) return { monthKey, rateTarget: 0 };
+      return { monthKey: rows[0].month_key, rateTarget: parseFloat(rows[0].rate_target) || 0 };
+    },
+    async upsertKgiMonthly(monthKey, rateTarget) {
+      await pool.query(
+        'INSERT INTO kgi_monthly (month_key, rate_target) VALUES ($1,$2) ON CONFLICT (month_key) DO UPDATE SET rate_target=EXCLUDED.rate_target',
+        [monthKey, rateTarget]
+      );
+      return { monthKey, rateTarget };
     }
   };
   console.log('PostgreSQLモードで起動');
@@ -127,7 +165,14 @@ if (DATABASE_URL) {
     const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
     if (!Array.isArray(data.kpiGoals)) data.kpiGoals = [];
     if (!Array.isArray(data.userKpiGoals)) data.userKpiGoals = [];
-    if (Array.isArray(data.deals)) data.deals = data.deals.map(d => ({ ...d, paymentMethod: d.paymentMethod || 'card_once', closerUserId: d.closerUserId || null }));
+    if (!Array.isArray(data.kgiMonthly)) data.kgiMonthly = [];
+    if (Array.isArray(data.deals)) data.deals = data.deals.map(d => ({
+      ...d,
+      paymentMethod: d.paymentMethod || 'card_once',
+      closerUserId: d.closerUserId || null,
+      installmentMonths: d.installmentMonths || 1,
+      firstPaymentMonth: d.firstPaymentMonth || d.month
+    }));
     return data;
   }
   function writeDB(data) { fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8'); }
@@ -137,7 +182,7 @@ if (DATABASE_URL) {
       if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
       if (!fs.existsSync(DB_PATH)) {
         const hash = bcrypt.hashSync('admin123', 10);
-        writeDB({ users: [{ id: generateId(), username: 'admin', password: hash, displayName: '管理者', role: 'admin' }], closers: [], deals: [], kpiGoals: [], userKpiGoals: [] });
+        writeDB({ users: [{ id: generateId(), username: 'admin', password: hash, displayName: '管理者', role: 'admin' }], closers: [], deals: [], kpiGoals: [], userKpiGoals: [], kgiMonthly: [] });
         console.log('初期データベースを作成 (admin / admin123)');
       }
     },
@@ -150,7 +195,10 @@ if (DATABASE_URL) {
     async addCloser(name) { const d = readDB(); if (!d.closers.includes(name)) { d.closers.push(name); writeDB(d); } return readDB().closers; },
     async deleteCloser(name) { const d = readDB(); d.closers = d.closers.filter(c => c !== name); writeDB(d); return d.closers; },
     async closerExists(name) { return readDB().closers.includes(name); },
-    async getDealsByMonth(month) { return readDB().deals.filter(d => d.month === month); },
+    async getDealsByMonth(month) {
+      const deals = readDB().deals;
+      return deals.filter(d => getRecognizedRevenueForMonth(d, month) > 0 || d.month === month);
+    },
     async getDealById(id) { return readDB().deals.find(d => d.id === id) || null; },
     async addDeal(deal) { const d = readDB(); d.deals.push(deal); writeDB(d); return deal; },
     async updateDeal(id, updates) { const d = readDB(); const idx = d.deals.findIndex(x => x.id === id); if (idx !== -1) { d.deals[idx] = { ...d.deals[idx], ...updates, id }; writeDB(d); } },
@@ -180,6 +228,20 @@ if (DATABASE_URL) {
       const payload = { weekKey, userId, closedTarget, rateTarget, resultStatus };
       if (idx === -1) d.userKpiGoals.push(payload);
       else d.userKpiGoals[idx] = payload;
+      writeDB(d);
+      return payload;
+    },
+    async getKgiMonthly(monthKey) {
+      const g = readDB().kgiMonthly.find(x => x.monthKey === monthKey);
+      if (!g) return { monthKey, rateTarget: 0 };
+      return { monthKey, rateTarget: parseFloat(g.rateTarget) || 0 };
+    },
+    async upsertKgiMonthly(monthKey, rateTarget) {
+      const d = readDB();
+      const idx = d.kgiMonthly.findIndex(x => x.monthKey === monthKey);
+      const payload = { monthKey, rateTarget };
+      if (idx === -1) d.kgiMonthly.push(payload);
+      else d.kgiMonthly[idx] = payload;
       writeDB(d);
       return payload;
     }
@@ -231,13 +293,14 @@ app.get('/api/me', requireAuth, async (req, res) => {
 app.get('/api/dashboard', requireAuth, async (req, res) => {
   try {
     const month = req.query.month || getCurrentMonth();
-    const weekKey = req.query.weekKey || getISOWeekKey();
+    const periodKey = req.query.periodKey || getISOWeekKey();
     const [deals, prevDeals, closers] = await Promise.all([
       db.getDealsByMonth(month), db.getDealsByMonth(getPrevMonth(month)), db.getClosers()
     ]);
-    const kpiGoal = await db.getKpiGoalByWeek(weekKey);
-    const myKpiGoal = await db.getUserKpiGoalByWeek(weekKey, req.session.userId);
-    res.json({ deals, prevDeals, closers, kpiGoal, myKpiGoal });
+    const kpiGoal = await db.getKpiGoalByWeek(periodKey);
+    const myKpiGoal = await db.getUserKpiGoalByWeek(periodKey, req.session.userId);
+    const kgiMonthly = await db.getKgiMonthly(month);
+    res.json({ deals, prevDeals, closers, kpiGoal, myKpiGoal, kgiMonthly });
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
 
@@ -246,9 +309,9 @@ app.get('/api/dashboard', requireAuth, async (req, res) => {
 // ============================================================
 app.post('/api/deals', requireAuth, async (req, res) => {
   try {
-    const { date, month, clientName, closer, closerUserId, productPrice, status, lossReason, hasFollowUp, paymentMethod } = req.body;
+    const { date, month, clientName, closer, closerUserId, productPrice, status, lossReason, hasFollowUp, paymentMethod, installmentMonths, firstPaymentMonth } = req.body;
     if (!date || !clientName || !closer || !productPrice || !status) return res.status(400).json({ error: '必須項目を入力してください' });
-    const deal = { id: generateId(), date, month, clientName, closer, closerUserId: closerUserId || null, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', createdBy: req.session.userId };
+    const deal = { id: generateId(), date, month, clientName, closer, closerUserId: closerUserId || null, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', installmentMonths: installmentMonths || 1, firstPaymentMonth: firstPaymentMonth || month, createdBy: req.session.userId };
     await db.addDeal(deal);
     res.json(deal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
@@ -258,8 +321,8 @@ app.put('/api/deals/:id', requireAdmin, async (req, res) => {
   try {
     const existing = await db.getDealById(req.params.id);
     if (!existing) return res.status(404).json({ error: '商談が見つかりません' });
-    const { date, month, clientName, closer, closerUserId, productPrice, status, lossReason, hasFollowUp, paymentMethod } = req.body;
-    await db.updateDeal(req.params.id, { date, month, clientName, closer, closerUserId: closerUserId || null, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once' });
+    const { date, month, clientName, closer, closerUserId, productPrice, status, lossReason, hasFollowUp, paymentMethod, installmentMonths, firstPaymentMonth } = req.body;
+    await db.updateDeal(req.params.id, { date, month, clientName, closer, closerUserId: closerUserId || null, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', installmentMonths: installmentMonths || 1, firstPaymentMonth: firstPaymentMonth || month });
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
@@ -270,6 +333,15 @@ app.put('/api/kpi-goals/:weekKey', requireAdmin, async (req, res) => {
     const normalizedClosed = Math.max(0, parseInt(closedTarget, 10) || 0);
     const normalizedRate = Math.max(0, Math.min(100, parseFloat(rateTarget) || 0));
     const goal = await db.upsertKpiGoal(req.params.weekKey, normalizedClosed, normalizedRate);
+    res.json(goal);
+  } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
+});
+
+app.put('/api/kgi-monthly/:monthKey', requireAdmin, async (req, res) => {
+  try {
+    const { rateTarget } = req.body;
+    const normalizedRate = Math.max(0, Math.min(100, parseFloat(rateTarget) || 0));
+    const goal = await db.upsertKgiMonthly(req.params.monthKey, normalizedRate);
     res.json(goal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
@@ -382,14 +454,15 @@ app.get('/api/export/csv', requireAdmin, async (req, res) => {
   try {
     const month = req.query.month || getCurrentMonth();
     const deals = await db.getDealsByMonth(month);
-    const headers = ['日付', '商談相手', 'クローザー', '商材単価', '支払い手段', '状況', '失注理由', '再面談', '成約単価', 'クローザー報酬'];
+    const headers = ['日付', '商談相手', 'クローザー', '商材単価', '支払い手段', '分割回数', '初回請求月', '状況', '失注理由', '再面談', '今月売上(17.5%)', 'クローザー報酬'];
     const rows = deals.map(d => {
       const sl = d.status === 'closed' ? '成約' : d.status === 'lost' ? '失注' : '検討';
       const payment = d.paymentMethod || 'card_once';
       const incentive = d.status === 'closed' && payment === 'bank_once' ? BANK_ONCE_INCENTIVE : 0;
-      const comm = d.status === 'closed' ? d.productPrice * COMMISSION_RATE : 0;
+      const monthRev = d.status === 'closed' ? getRecognizedRevenueForMonth(d, month) : 0;
+      const comm = d.status === 'closed' ? monthRev * COMMISSION_RATE : 0;
       const comp = d.status === 'closed' ? Math.round(comm * CLOSER_RATE) + incentive : 0;
-      return [d.date, d.clientName, d.closer, d.productPrice, PAYMENT_METHOD_LABELS[payment] || payment, sl, d.lossReason || '', d.hasFollowUp ? 'あり' : 'なし', comm, comp];
+      return [d.date, d.clientName, d.closer, d.productPrice, PAYMENT_METHOD_LABELS[payment] || payment, d.installmentMonths || 1, d.firstPaymentMonth || d.month, sl, d.lossReason || '', d.hasFollowUp ? 'あり' : 'なし', comm, comp];
     });
     const csv = '\uFEFF' + [headers, ...rows].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
