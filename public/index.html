@@ -349,13 +349,30 @@
 
     // ===== API Helper =====
     async function api(method, url, body) {
-      const opts = { method, headers: {} };
-      if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-      const res = await fetch(url, opts);
-      if (res.status === 401) { window.location.href = '/login.html'; return null; }
-      const data = await res.json();
-      if (!res.ok) { alert(data.error || 'エラーが発生しました'); return null; }
-      return data;
+      try {
+        const opts = { method, headers: {} };
+        if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+        const res = await fetch(url, opts);
+        if (res.status === 401) { window.location.href = '/login.html'; return null; }
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        let data = null;
+        if (contentType.includes('application/json')) {
+          data = await res.json();
+        } else {
+          const text = await res.text();
+          data = text ? { error: text } : {};
+        }
+        if (!res.ok) {
+          const msg = (data && data.error) ? data.error : `エラーが発生しました (${res.status})`;
+          alert(msg);
+          return null;
+        }
+        return data;
+      } catch (e) {
+        console.error(e);
+        alert('通信エラーが発生しました。時間をおいて再度お試しください。');
+        return null;
+      }
     }
 
     // ===== Utilities =====
@@ -569,7 +586,7 @@
         const comm = d.status === 'closed' ? formatCurrency(getDealCommission(d)) : '-';
         const closerComp = d.status === 'closed' ? formatCurrency(getDealCloserCompensation(d)) : '-';
         const payment = PAYMENT_METHOD_LABELS[d.paymentMethod || 'card_once'] || '未設定';
-        const actions = isAdmin() ? `<td><button class="btn btn-secondary btn-sm" onclick="editDeal('${d.id}')">編集</button> <button class="btn btn-danger btn-sm" onclick="deleteDeal('${d.id}')">削除</button></td>` : '<td></td>';
+        const actions = isAdmin() ? `<td><button type="button" class="btn btn-secondary btn-sm" onclick="editDeal('${d.id}')">編集</button> <button type="button" class="btn btn-danger btn-sm" onclick="deleteDeal('${d.id}')">削除</button></td>` : '<td></td>';
         return `<tr><td>${d.date}</td><td>${esc(d.clientName)}</td><td>${esc(d.closer)}</td><td>${(d.productPrice/10000).toFixed(0)}万円</td><td>${esc(payment)}</td><td>${d.installmentMonths || 1}</td><td>${d.firstPaymentMonth || d.month}</td><td><span class="badge ${sc}">${sl}</span></td><td>${d.status==='lost'?esc(d.lossReason):'-'}</td><td>${d.hasFollowUp?'<span class="badge badge-followup">再面談</span>':'-'}</td><td>${comm}</td><td>${closerComp}</td>${actions}</tr>`;
       }).join('');
       const actionTh = isAdmin() ? '<th>操作</th>' : '<th></th>';
@@ -933,7 +950,8 @@
 
     async function deleteDeal(id) {
       if (!confirm('この商談を削除しますか？')) return;
-      await api('DELETE', `/api/deals/${id}`);
+      const result = await api('DELETE', `/api/deals/${id}`);
+      if (!result) return;
       await render();
     }
 
