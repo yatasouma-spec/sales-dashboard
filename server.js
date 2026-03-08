@@ -401,6 +401,17 @@ async function deleteDealAsAdmin(req, res) {
 }
 app.delete('/api/deals/:id', requireAdmin, deleteDealAsAdmin);
 app.post('/api/deals/:id/delete', requireAdmin, deleteDealAsAdmin);
+app.post('/deals/:id/delete', requireAdmin, async (req, res) => {
+  try {
+    const deal = await db.getDealById(req.params.id);
+    if (!deal) return res.redirect('/');
+    await db.deleteDeal(req.params.id);
+    return res.redirect('/');
+  } catch (e) {
+    console.error(e);
+    return res.redirect('/');
+  }
+});
 
 // ============================================================
 // Closers

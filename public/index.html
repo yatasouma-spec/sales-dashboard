@@ -611,7 +611,11 @@
         const comm = d.status === 'closed' ? formatCurrency(getDealCommission(d)) : '-';
         const closerComp = d.status === 'closed' ? formatCurrency(getDealCloserCompensation(d)) : '-';
         const payment = PAYMENT_METHOD_LABELS[d.paymentMethod || 'card_once'] || '未設定';
-        const actions = isAdmin() ? `<td><button type="button" class="btn btn-secondary btn-sm" onclick="editDeal('${d.id}')">編集</button> <button type="button" class="btn btn-danger btn-sm" onclick="deleteDeal('${d.id}')">削除</button></td>` : '<td></td>';
+        const deleteAction = `
+          <form method="POST" action="/deals/${encodeURIComponent(d.id)}/delete" style="display:inline" onsubmit="return confirm('この商談を削除しますか？')">
+            <button type="submit" class="btn btn-danger btn-sm">削除</button>
+          </form>`;
+        const actions = isAdmin() ? `<td><button type="button" class="btn btn-secondary btn-sm" onclick="editDeal('${d.id}')">編集</button> ${deleteAction}</td>` : '<td></td>';
         return `<tr><td>${d.date}</td><td>${esc(d.clientName)}</td><td>${esc(d.closer)}</td><td>${(d.productPrice/10000).toFixed(0)}万円</td><td>${esc(payment)}</td><td>${d.installmentMonths || 1}</td><td>${d.firstPaymentMonth || d.month}</td><td><span class="badge ${sc}">${sl}</span></td><td>${d.status==='lost'?esc(d.lossReason):'-'}</td><td>${d.hasFollowUp?'<span class="badge badge-followup">再面談</span>':'-'}</td><td>${comm}</td><td>${closerComp}</td>${actions}</tr>`;
       }).join('');
       const actionTh = isAdmin() ? '<th>操作</th>' : '<th></th>';
