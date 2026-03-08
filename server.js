@@ -391,17 +391,16 @@ app.put('/api/my-kpi-goal/:weekKey', requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
 
-app.delete('/api/deals/:id', requireAuth, async (req, res) => {
+async function deleteDealAsAdmin(req, res) {
   try {
     const deal = await db.getDealById(req.params.id);
     if (!deal) return res.status(404).json({ error: '商談が見つかりません' });
-    const isAdmin = req.session.role === 'admin';
-    const isOwner = deal.createdBy && deal.createdBy === req.session.userId;
-    if (!isAdmin && !isOwner) return res.status(403).json({ error: '削除権限がありません' });
     await db.deleteDeal(req.params.id);
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
-});
+}
+app.delete('/api/deals/:id', requireAdmin, deleteDealAsAdmin);
+app.post('/api/deals/:id/delete', requireAdmin, deleteDealAsAdmin);
 
 // ============================================================
 // Closers
