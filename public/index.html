@@ -347,6 +347,7 @@
       kpiEndDate: addDays(new Date().toISOString().slice(0, 10), 6)
     };
     const LOCAL_STATE_KEY = 'sales_dashboard_ui_state_v1';
+    const kpiAutoSaveTimers = {};
 
     // ===== API Helper =====
     async function api(method, url, body) {
@@ -697,10 +698,10 @@
         return `<tr>
           <td style="font-weight:600;">${esc(u.displayName)}</td>
           <td>${state.kpiStartDate}〜${m.kpiEndDate}</td>
-          <td><input id="${inputPrefix}Closed_${u.id}" type="number" min="0" step="1" value="${m.goalClosed}" style="width:100px"></td>
+          <td><input id="${inputPrefix}Closed_${u.id}" type="number" min="0" step="1" value="${m.goalClosed}" style="width:100px" oninput="queueUserKpiAutoSave('${u.id}','${inputPrefix}')"></td>
           <td>${m.closed}件</td>
           <td>${m.achievementRate.toFixed(1)}%</td>
-          <td><input id="${inputPrefix}Rate_${u.id}" type="number" min="0" max="100" step="0.1" value="${m.goalRate.toFixed(1)}" style="width:100px"></td>
+          <td><input id="${inputPrefix}Rate_${u.id}" type="number" min="0" max="100" step="0.1" value="${m.goalRate.toFixed(1)}" style="width:100px" oninput="queueUserKpiAutoSave('${u.id}','${inputPrefix}')"></td>
           <td>${m.rate.toFixed(1)}%</td>
           <td>${m.shortfallRate.toFixed(1)}%</td>
           <td>${m.monthRate.toFixed(1)}%</td>
@@ -1068,13 +1069,24 @@
       if (!goal) return;
       state.myKpiGoal = { ...goal, resultStatus: goal.resultStatus || 'auto' };
     }
-    async function saveUserKpiGoal(userId, resultStatus = 'auto', prefix = 'quick') {
+    function queueUserKpiAutoSave(userId, prefix = 'quick') {
+      const key = `${prefix}:${userId}`;
+      if (kpiAutoSaveTimers[key]) clearTimeout(kpiAutoSaveTimers[key]);
+      kpiAutoSaveTimers[key] = setTimeout(() => {
+        saveUserKpiGoal(userId, 'auto', prefix, true);
+      }, 700);
+    }
+    async function saveUserKpiGoal(userId, resultStatus = 'auto', prefix = 'quick', silent = false) {
       const periodKey = getPeriodKey();
       const closedTarget = parseInt(document.getElementById(`${prefix}Closed_${userId}`)?.value || '0', 10) || 0;
       const rateTarget = parseFloat(document.getElementById(`${prefix}Rate_${userId}`)?.value || '0') || 0;
-      await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(periodKey)}?userId=${encodeURIComponent(userId)}`, { closedTarget, rateTarget, resultStatus });
+      const ok = await api('PUT', `/api/my-kpi-goal/${encodeURIComponent(periodKey)}?userId=${encodeURIComponent(userId)}`, { closedTarget, rateTarget, resultStatus });
+      if (!ok) return;
       await loadUserKpiGoalMap();
       await render();
+      if (!silent && resultStatus !== 'auto') {
+        alert(`個人KPIを「${resultStatus === 'achieved' ? '達成' : '未達'}」に更新しました。`);
+      }
     }
     async function saveWeeklyKpiGoal() {
       const weekKey = getPeriodKey();
