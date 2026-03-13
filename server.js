@@ -12,6 +12,7 @@ const COMMISSION_RATE = 0.175;
 const CLOSER_RATE = 0.30;
 const BANK_ONCE_INCENTIVE = 1000;
 const PAYMENT_METHOD_LABELS = {
+  excluded: '対象外',
   card_once: 'クレカ一括',
   card_installment: 'クレカ分割',
   card_bank_mix: 'クレカと銀行振込',
@@ -60,6 +61,7 @@ function isMonthInRange(month, startMonth, months) {
 }
 function getRecognizedRevenueForMonth(deal, monthKey) {
   const method = deal.paymentMethod || 'card_once';
+  if (method === 'excluded' || !deal.productPrice) return 0;
   const months = Math.max(1, parseInt(deal.installmentMonths || 1, 10) || 1);
   const startMonth = deal.firstPaymentMonth || deal.month;
   if (method === 'card_installment' || method === 'card_bank_mix') {
@@ -310,8 +312,9 @@ app.get('/api/dashboard', requireAuth, async (req, res) => {
 app.post('/api/deals', requireAuth, async (req, res) => {
   try {
     const { date, month, clientName, closer, closerUserId, productPrice, status, lossReason, hasFollowUp, paymentMethod, installmentMonths, firstPaymentMonth } = req.body;
-    if (!date || !clientName || !closer || !productPrice || !status) return res.status(400).json({ error: '必須項目を入力してください' });
-    const deal = { id: generateId(), date, month, clientName, closer, closerUserId: closerUserId || null, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', installmentMonths: installmentMonths || 1, firstPaymentMonth: firstPaymentMonth || month, createdBy: req.session.userId };
+    const normalizedPrice = Math.max(0, parseInt(productPrice, 10) || 0);
+    if (!date || !clientName || !closer || !status) return res.status(400).json({ error: '必須項目を入力してください' });
+    const deal = { id: generateId(), date, month, clientName, closer, closerUserId: closerUserId || null, productPrice: normalizedPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', installmentMonths: installmentMonths || 1, firstPaymentMonth: firstPaymentMonth || month, createdBy: req.session.userId };
     await db.addDeal(deal);
     res.json(deal);
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
@@ -322,7 +325,8 @@ app.put('/api/deals/:id', requireAdmin, async (req, res) => {
     const existing = await db.getDealById(req.params.id);
     if (!existing) return res.status(404).json({ error: '商談が見つかりません' });
     const { date, month, clientName, closer, closerUserId, productPrice, status, lossReason, hasFollowUp, paymentMethod, installmentMonths, firstPaymentMonth } = req.body;
-    await db.updateDeal(req.params.id, { date, month, clientName, closer, closerUserId: closerUserId || null, productPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', installmentMonths: installmentMonths || 1, firstPaymentMonth: firstPaymentMonth || month });
+    const normalizedPrice = Math.max(0, parseInt(productPrice, 10) || 0);
+    await db.updateDeal(req.params.id, { date, month, clientName, closer, closerUserId: closerUserId || null, productPrice: normalizedPrice, status, lossReason: lossReason || '', hasFollowUp: !!hasFollowUp, paymentMethod: paymentMethod || 'card_once', installmentMonths: installmentMonths || 1, firstPaymentMonth: firstPaymentMonth || month });
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: 'サーバーエラー' }); }
 });
@@ -473,7 +477,7 @@ app.get('/api/export/csv', requireAdmin, async (req, res) => {
     const deals = await db.getDealsByMonth(month);
     const headers = ['日付', '商談相手', 'クローザー', '商材単価', '支払い手段', '分割回数', '初回請求月', '状況', '失注理由', '再面談', '今月売上(17.5%)', 'クローザー報酬'];
     const rows = deals.map(d => {
-      const sl = d.status === 'closed' ? '成約' : d.status === 'lost' ? '失注' : '検討';
+      const sl = d.status === 'closed' ? '成約' : d.status === 'lost' ? '失注' : d.status === 'excluded' ? '対象外' : '検討';
       const payment = d.paymentMethod || 'card_once';
       const incentive = d.status === 'closed' && payment === 'bank_once' ? BANK_ONCE_INCENTIVE : 0;
       const monthRev = d.status === 'closed' ? getRecognizedRevenueForMonth(d, month) : 0;
